@@ -1,0 +1,107 @@
+name: Compilar Vencord + plugins
+
+# Compila la última versión de Vencord con los plugins de /plugins y la publica como Release.
+# El actualizador de Vencord (dentro de Vesktop) descarga esas Releases automáticamente.
+on:
+    push:
+        branches: [main]
+        paths:
+            - plugins/**
+            - .github/workflows/build.yml
+    schedule:
+        - cron: "17 9 * * *" # todos los días (UTC); solo publica si Vencord cambió
+    workflow_dispatch:
+
+permissions:
+    contents: write
+
+concurrency:
+    group: build
+    cancel-in-progress: false
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Ver última versión de Vencord
+              id: upstream
+              run: |
+                  SHA=$(git ls-remote https://github.com/Vendicated/Vencord.git refs/heads/main | cut -f1)
+                  echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+                  echo "Vencord upstream: $SHA"
+
+            # Cada versión publicada corresponde a un commit de ESTE repo, porque el actualizador
+            # de Vencord compara commits de este repo. Si Vencord cambió, lo anotamos con un commit.
+            - name: Anotar versión de Vencord
+              run: |
+                  if [ "$(cat vencord-version.txt 2>/dev/null)" != "${{ steps.upstream.outputs.sha }}" ]; then
+                      echo "${{ steps.upstream.outputs.sha }}" > vencord-version.txt
+                      git config user.name "github-actions[bot]"
+                      git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                      git add vencord-version.txt
+                      git commit -m "Vencord ${{ steps.upstream.outputs.sha }} [skip ci]"
+                      git push
+                  fi
+                  echo "HASH=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+            - name: ¿Ya existe esta versión?
+              id: exists
+              run: |
+                  if gh release view "v-$HASH" >/dev/null 2>&1; then echo "yes=1" >> "$GITHUB_OUTPUT"; fi
+              env:
+                  GH_TOKEN: ${{ github.token }}
+
+            - name: Descargar Vencord
+              if: steps.exists.outputs.yes != '1'
+              run: |
+                  git clone https://github.com/Vendicated/Vencord.git vencord
+                  git -C vencord checkout "$(cat vencord-version.txt)"
+                  mkdir -p vencord/src/userplugins
+                  cp -r plugins/* vencord/src/userplugins/
+
+            - uses: pnpm/action-setup@v4
+              if: steps.exists.outputs.yes != '1'
+              with:
+                  package_json_file: vencord/package.json
+
+            - uses: actions/setup-node@v4
+              if: steps.exists.outputs.yes != '1'
+              with:
+                  node-version: 24
+
+            - name: Compilar
+              if: steps.exists.outputs.yes != '1'
+              working-directory: vencord
+              run: |
+                  pnpm install --frozen-lockfile
+                  pnpm build --standalone
+              env:
+                  # El actualizador de Vencord buscará las Releases de ESTE repo
+                  VENCORD_REMOTE: ${{ github.repository }}
+                  VENCORD_HASH: ${{ env.HASH }}
+
+            - name: Componente nativo (captura de audio por app)
+              if: steps.exists.outputs.yes != '1'
+              run: |
+                  npm pack loopback-capture@3.0.2
+                  tar xzf loopback-capture-3.0.2.tgz
+                  cp package/prebuilds/win32-x64/loopback_capture_addon.node vencord/dist/
+                  cp package/LICENSE vencord/dist/loopback-capture.LICENSE.txt
+
+            - name: Publicar Release
+              if: steps.exists.outputs.yes != '1'
+              working-directory: vencord/dist
+              run: |
+                  FILES="vencordDesktopMain.js vencordDesktopPreload.js vencordDesktopRenderer.js vencordDesktopRenderer.css loopback_capture_addon.node loopback-capture.LICENSE.txt"
+                  zip vendroid.zip $FILES
+                  gh release create "v-$HASH" $FILES vendroid.zip \
+                      --repo "${{ github.repository }}" \
+                      --title "Vendroid $HASH" \
+                      --notes "Vencord $(cat ../../vencord-version.txt) + plugins de este repo. Instalar: descomprimir vendroid.zip en la carpeta de Vencord de Vesktop." \
+                      --latest
+              env:
+                  GH_TOKEN: ${{ github.token }}

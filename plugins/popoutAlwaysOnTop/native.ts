@@ -32,3 +32,25 @@ export function set(_: IpcMainInvokeEvent, value: boolean): boolean | null {
 export function minimize(_: IpcMainInvokeEvent) {
     focusedPopout()?.minimize();
 }
+
+// Arrastrar la ventana desde cualquier parte (mantener clic y mover)
+let dragWin: BrowserWindow | null = null;
+let dragStartPos: [number, number] = [0, 0];
+
+export function dragStart(_: IpcMainInvokeEvent): boolean {
+    const win = focusedPopout();
+    if (!win || win.isMaximized() || win.isFullScreen()) return false;
+    dragWin = win;
+    const [x, y] = win.getPosition();
+    dragStartPos = [x, y];
+    return true;
+}
+
+export function dragMove(_: IpcMainInvokeEvent, dx: number, dy: number) {
+    if (!dragWin || dragWin.isDestroyed()) return;
+    dragWin.setPosition(Math.round(dragStartPos[0] + dx), Math.round(dragStartPos[1] + dy));
+}
+
+export function dragEnd(_: IpcMainInvokeEvent) {
+    dragWin = null;
+}

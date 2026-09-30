@@ -19,6 +19,22 @@ function currentIconPath() {
     }
 }
 
+// Vesktop pone el numerito de notificaciones (overlay) solo cuando cambia la cantidad.
+// Cambiar el icono de la ventana hace que Windows lo borre, así que recordamos el último
+// overlay de cada ventana y lo volvemos a poner después de cada cambio de icono.
+type Overlay = [NativeImage | null, string];
+const lastOverlay = new WeakMap<BrowserWindow, Overlay>();
+const origSetOverlay = BrowserWindow.prototype.setOverlayIcon;
+BrowserWindow.prototype.setOverlayIcon = function (this: BrowserWindow, overlay: NativeImage | null, description: string) {
+    lastOverlay.set(this, [overlay, description]);
+    return origSetOverlay.call(this, overlay, description);
+};
+
+function restoreOverlay(win: BrowserWindow) {
+    const o = lastOverlay.get(win);
+    if (o && !win.isDestroyed()) origSetOverlay.call(win, o[0], o[1]);
+}
+
 let customIcon: NativeImage | null = null;
 let defaultIcon: NativeImage | null = null;
 
@@ -32,6 +48,7 @@ function applyTo(win: BrowserWindow) {
     if (win.isDestroyed()) return;
     if (customIcon) win.setIcon(customIcon);
     else if (defaultIcon) win.setIcon(defaultIcon);
+    restoreOverlay(win);
 }
 
 function applyAll() {
@@ -43,6 +60,11 @@ app.on("browser-window-created", (_e, win) => {
     if (customIcon) applyTo(win);
     // Vesktop puede fijar su icono al terminar de crear la ventana; lo volvemos a aplicar
     win.once("ready-to-show", () => customIcon && applyTo(win));
+    // Windows puede recrear el botón de la barra de tareas (al mostrar/restaurar la ventana)
+    // y perder el numerito; lo reponemos.
+    const reapply = () => { if (customIcon) setTimeout(() => restoreOverlay(win), 300); };
+    win.on("show", reapply);
+    win.on("restore", reapply);
 });
 app.whenReady().then(async () => {
     try { defaultIcon = await app.getFileIcon(process.execPath, { size: "large" }); } catch { }

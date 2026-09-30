@@ -28,3 +28,7 @@ export function set(_: IpcMainInvokeEvent, value: boolean): boolean | null {
     win.setAlwaysOnTop(value);
     return value;
 }
+
+export function minimize(_: IpcMainInvokeEvent) {
+    focusedPopout()?.minimize();
+}

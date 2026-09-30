@@ -50,12 +50,42 @@ const settings = definePluginSettings({
         type: OptionType.COMPONENT,
         description: "Icono de la ventana",
         component: IconPicker
+    },
+    cleanTitle: {
+        type: OptionType.BOOLEAN,
+        description: "Quitar el contador de menciones \"(2)\" del título de la ventana (como la app oficial)",
+        default: true,
+        onChange: () => refreshTitle()
     }
 });
+
+// Discord web pone "(N) " o "• " delante del título; la app oficial no lo muestra.
+const COUNT_PREFIX = /^(\(\d+\+?\)|•)\s*/;
+const titleDesc = Object.getOwnPropertyDescriptor(Document.prototype, "title")!;
+let rawTitle = "";
+
+function refreshTitle() {
+    titleDesc.set!.call(document, settings.store.cleanTitle ? rawTitle.replace(COUNT_PREFIX, "") : rawTitle);
+}
 
 export default definePlugin({
     name: "CustomAppIcon",
     description: "Cambia el icono de Vesktop en la barra de tareas por una imagen que elijas.",
     authors: [{ name: "Richardant", id: 0n }],
-    settings
+    settings,
+
+    start() {
+        rawTitle = titleDesc.get!.call(document);
+        Object.defineProperty(document, "title", {
+            configurable: true,
+            get: () => titleDesc.get!.call(document),
+            set: (v: string) => { rawTitle = String(v); refreshTitle(); }
+        });
+        refreshTitle();
+    },
+
+    stop() {
+        delete (document as any).title;
+        titleDesc.set!.call(document, rawTitle);
+    }
 });

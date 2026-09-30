@@ -15,6 +15,11 @@ const settings = definePluginSettings({
         description: "Abrir los popouts sin barra de título (aparece una barra al pasar el mouse por arriba)",
         default: true
     },
+    dragAnywhere: {
+        type: OptionType.BOOLEAN,
+        description: "Mover el popout manteniendo el clic y arrastrando desde cualquier parte",
+        default: true
+    },
     autoPin: {
         type: OptionType.BOOLEAN,
         description: "Poner automáticamente siempre encima cada popout nuevo",
@@ -169,6 +174,62 @@ function ensureButton(win: Window) {
     }
 }
 
+const INTERACTIVE = "button, a, input, select, textarea, [role=slider], [role=button], [role=menuitem], [contenteditable=true]";
+const DRAG_THRESHOLD = 4;
+
+function setupDrag(win: Window) {
+    const doc = win.document;
+    let startX = 0, startY = 0, pointerId = -1;
+    let dragging = false, started = false, pending = false;
+    let lastDx = 0, lastDy = 0, raf = 0;
+
+    const flush = () => {
+        raf = 0;
+        if (started) void Native.dragMove(lastDx, lastDy);
+    };
+
+    doc.addEventListener("pointerdown", e => {
+        if (!settings.store.dragAnywhere || e.button !== 0) return;
+        if ((e.target as Element)?.closest?.(`${INTERACTIVE}, .vc-paot-drag`)) return;
+        pointerId = e.pointerId;
+        startX = e.screenX; startY = e.screenY;
+        dragging = false; started = false; pending = false;
+    }, true);
+
+    doc.addEventListener("pointermove", e => {
+        if (e.pointerId !== pointerId || !(e.buttons & 1)) return;
+        const dx = e.screenX - startX, dy = e.screenY - startY;
+        if (!dragging) {
+            if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+            dragging = true;
+            try { (e.target as Element).setPointerCapture?.(e.pointerId); } catch { }
+            if (!pending) {
+                pending = true;
+                win.focus();
+                void Native.dragStart().then(ok => { started = ok; if (ok) flush(); });
+            }
+        }
+        lastDx = dx; lastDy = dy;
+        if (!raf) raf = win.requestAnimationFrame(flush);
+    }, true);
+
+    const end = (e: PointerEvent) => {
+        if (e.pointerId !== pointerId) return;
+        pointerId = -1;
+        if (dragging) {
+            void Native.dragEnd();
+            // que el clic al soltar no active nada (p. ej. pausar el video)
+            const swallow = (ev: MouseEvent) => { ev.stopPropagation(); ev.preventDefault(); };
+            doc.addEventListener("click", swallow, { capture: true, once: true });
+            win.setTimeout(() => doc.removeEventListener("click", swallow, true), 300);
+            win.setTimeout(() => { dragging = false; }, 0);
+        }
+        started = false;
+    };
+    doc.addEventListener("pointerup", end, true);
+    doc.addEventListener("pointercancel", end, true);
+}
+
 function trackPopout(win: Window) {
     if (tracked.has(win)) return;
     tracked.add(win);
@@ -182,6 +243,7 @@ function trackPopout(win: Window) {
             return;
         }
         ensureButton(win);
+        setupDrag(win);
         // Discord vuelve a renderizar el popout; mantener el botón presente
         const obs = new win.MutationObserver(() => ensureButton(win));
         obs.observe(win.document.body, { childList: true, subtree: true });

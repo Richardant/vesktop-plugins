@@ -122,8 +122,8 @@ function ensureBar(win: Window, pin: HTMLButtonElement) {
 
     // Las zonas de arrastre no reciben eventos del mouse en Windows, así que mostramos la barra
     // cuando el mouse se acerca al borde superior y la ocultamos al bajar o salir de la ventana.
-    if (!(win as any).__vcPaotBarListeners) {
-        (win as any).__vcPaotBarListeners = true;
+    if (!(doc as any).__vcPaotBarListeners) {
+        (doc as any).__vcPaotBarListeners = true;
         let hideTimer = 0;
         const show = () => {
             win.clearTimeout(hideTimer);
@@ -174,26 +174,59 @@ function ensureButton(win: Window) {
     }
 }
 
-const INTERACTIVE = "button, a, input, select, textarea, [role=slider], [role=button], [role=menuitem], [contenteditable=true]";
+// Controles reales donde NO se arrastra. Los [role=button] solo cuentan si son pequeños:
+// Discord marca el área entera del video como role=button y eso impedía arrastrar.
+const INTERACTIVE = "button, a, input, select, textarea, [role=slider], [role=menuitem], [role=menu], [contenteditable=true]";
+
+function isControl(target: Element | null) {
+    if (!target?.closest) return false;
+    if (target.closest(`${INTERACTIVE}, .vc-paot-drag`)) return true;
+    const rb = target.closest<HTMLElement>("[role=button]");
+    if (rb) {
+        const r = rb.getBoundingClientRect();
+        if (r.width < 120 && r.height < 120) return true;
+    }
+    return false;
+}
 const DRAG_THRESHOLD = 4;
+
+const HOLD_MS = 180; // mantener pulsado este tiempo activa el arrastre aunque no muevas el mouse
 
 function setupDrag(win: Window) {
     const doc = win.document;
     let startX = 0, startY = 0, pointerId = -1;
     let dragging = false, started = false, pending = false;
-    let lastDx = 0, lastDy = 0, raf = 0;
+    let lastDx = 0, lastDy = 0, raf = 0, holdTimer = 0;
+    let prevCursor = "";
 
     const flush = () => {
         raf = 0;
         if (started) void Native.dragMove(lastDx, lastDy);
     };
 
+    const beginDrag = (target: EventTarget | null) => {
+        if (dragging) return;
+        dragging = true;
+        prevCursor = doc.documentElement.style.cursor;
+        doc.documentElement.style.cursor = "move";
+        try { (target as Element)?.setPointerCapture?.(pointerId); } catch { }
+        if (!pending) {
+            pending = true;
+            win.focus();
+            void Native.dragStart().then(ok => { started = ok; if (ok) flush(); });
+        }
+    };
+
     doc.addEventListener("pointerdown", e => {
         if (!settings.store.dragAnywhere || e.button !== 0) return;
-        if ((e.target as Element)?.closest?.(`${INTERACTIVE}, .vc-paot-drag`)) return;
+        if (isControl(e.target as Element)) return;
         pointerId = e.pointerId;
         startX = e.screenX; startY = e.screenY;
+        lastDx = 0; lastDy = 0;
         dragging = false; started = false; pending = false;
+        win.clearTimeout(holdTimer);
+        const target = e.target;
+        holdTimer = win.setTimeout(() => { if (pointerId === e.pointerId) beginDrag(target); }, HOLD_MS);
     }, true);
 
     doc.addEventListener("pointermove", e => {
@@ -201,13 +234,8 @@ function setupDrag(win: Window) {
         const dx = e.screenX - startX, dy = e.screenY - startY;
         if (!dragging) {
             if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
-            dragging = true;
-            try { (e.target as Element).setPointerCapture?.(e.pointerId); } catch { }
-            if (!pending) {
-                pending = true;
-                win.focus();
-                void Native.dragStart().then(ok => { started = ok; if (ok) flush(); });
-            }
+            win.clearTimeout(holdTimer);
+            beginDrag(e.target);
         }
         lastDx = dx; lastDy = dy;
         if (!raf) raf = win.requestAnimationFrame(flush);
@@ -216,13 +244,18 @@ function setupDrag(win: Window) {
     const end = (e: PointerEvent) => {
         if (e.pointerId !== pointerId) return;
         pointerId = -1;
+        win.clearTimeout(holdTimer);
         if (dragging) {
             void Native.dragEnd();
-            // que el clic al soltar no active nada (p. ej. pausar el video)
-            const swallow = (ev: MouseEvent) => { ev.stopPropagation(); ev.preventDefault(); };
-            doc.addEventListener("click", swallow, { capture: true, once: true });
-            win.setTimeout(() => doc.removeEventListener("click", swallow, true), 300);
-            win.setTimeout(() => { dragging = false; }, 0);
+            doc.documentElement.style.cursor = prevCursor;
+            // Solo si de verdad se movió la ventana, el clic al soltar no activa nada.
+            // Un clic rápido (sin mantener ni mover) funciona normal.
+            if (lastDx !== 0 || lastDy !== 0) {
+                const swallow = (ev: MouseEvent) => { ev.stopPropagation(); ev.preventDefault(); };
+                doc.addEventListener("click", swallow, { capture: true, once: true });
+                win.setTimeout(() => doc.removeEventListener("click", swallow, true), 300);
+            }
+            dragging = false;
         }
         started = false;
     };
@@ -234,22 +267,31 @@ function trackPopout(win: Window) {
     if (tracked.has(win)) return;
     tracked.add(win);
 
+    // Discord abre el popout con una página vacía (about:blank) y luego carga la real,
+    // que REEMPLAZA el documento. Revisamos periódicamente y nos enganchamos a cada
+    // documento nuevo (botón, barra y arrastre), no solo al primero.
+    let currentDoc: Document | null = null;
     let observer: MutationObserver | null = null;
-    let tries = 0;
-    const attach = () => {
-        if (win.closed) { tracked.delete(win); return; }
-        if (!win.document?.body) {
-            if (tries++ < 100) setTimeout(attach, 100);
-            return;
-        }
+    let autoPinned = false;
+
+    const check = () => {
+        if (win.closed) { observer?.disconnect(); tracked.delete(win); return; }
+        let doc: Document;
+        try { doc = win.document; } catch { return; }
+        if (!doc?.body || doc === currentDoc) return;
+        // esperar a la página real del popout (no la about:blank inicial) salvo que ya tenga contenido
+        if (doc.URL === "about:blank" && doc.body.childElementCount === 0) return;
+
+        currentDoc = doc;
+        observer?.disconnect();
         ensureButton(win);
         setupDrag(win);
-        // Discord vuelve a renderizar el popout; mantener el botón presente
         const obs = new win.MutationObserver(() => ensureButton(win));
-        obs.observe(win.document.body, { childList: true, subtree: true });
+        obs.observe(doc.body, { childList: true, subtree: true });
         observer = obs;
 
-        if (settings.store.autoPin) {
+        if (settings.store.autoPin && !autoPinned) {
+            autoPinned = true;
             setTimeout(async () => {
                 win.focus();
                 const state = await Native.set(true);
@@ -261,12 +303,12 @@ function trackPopout(win: Window) {
             }, 400);
         }
     };
-    attach();
 
-    win.addEventListener("beforeunload", () => {
-        observer?.disconnect();
-        tracked.delete(win);
-    });
+    const timer = setInterval(() => {
+        if (win.closed) { clearInterval(timer); observer?.disconnect(); tracked.delete(win); return; }
+        check();
+    }, 250);
+    check();
 }
 
 export default definePlugin({

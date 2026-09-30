@@ -57,17 +57,17 @@ const BAR_CSS = `
 .${BAR_CLASS} {
     position: fixed; top: 0; left: 0; right: 0; height: 30px; z-index: 100001;
     display: flex; align-items: center; gap: 2px; padding: 0 4px;
-    background: linear-gradient(rgba(0,0,0,.8), rgba(0,0,0,.45));
-    color: #fff; font: 600 12px/1 sans-serif;
+    background: transparent;
+    color: #fff;
     opacity: 0; pointer-events: none; transition: opacity .15s;
 }
 .${BAR_CLASS}.vc-paot-show { opacity: 1; pointer-events: auto; }
 .${BAR_CLASS} .vc-paot-drag {
-    flex: 1; height: 100%; display: flex; align-items: center; padding-left: 6px;
-    overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    flex: 1; height: 100%;
     -webkit-app-region: drag; app-region: drag;
 }
-.${BAR_CLASS} .${BTN_CLASS} { color: #ddd; margin: 0; }
+.${BAR_CLASS} .${BTN_CLASS} { color: #fff; margin: 0; filter: drop-shadow(0 0 2px rgba(0,0,0,.9)); }
+.${BAR_CLASS} .${BTN_CLASS}:hover { background: rgba(0,0,0,.35); }
 .${BAR_CLASS} .vc-paot-close:hover { background: #e81123; color: #fff; }
 `;
 
@@ -102,8 +102,7 @@ function ensureBar(win: Window, pin: HTMLButtonElement) {
     bar.className = BAR_CLASS;
 
     const drag = doc.createElement("div");
-    drag.className = "vc-paot-drag";
-    drag.textContent = doc.title || "Discord";
+    drag.className = "vc-paot-drag"; // zona vacía para arrastrar (sin título)
 
     const min = doc.createElement("button");
     min.className = BTN_CLASS;
@@ -128,8 +127,6 @@ function ensureBar(win: Window, pin: HTMLButtonElement) {
         const show = () => {
             win.clearTimeout(hideTimer);
             doc.querySelector(`.${BAR_CLASS}`)?.classList.add("vc-paot-show");
-            const d = doc.querySelector(`.${BAR_CLASS} .vc-paot-drag`);
-            if (d) d.textContent = doc.title || "Discord";
         };
         const hide = (delay = 600) => {
             win.clearTimeout(hideTimer);

@@ -63,6 +63,7 @@ const settings = definePluginSettings({
 const COUNT_PREFIX = /^(\(\d+\+?\)|•)\s*/;
 const titleDesc = Object.getOwnPropertyDescriptor(Document.prototype, "title")!;
 let rawTitle = "";
+let titleObserver: MutationObserver | null = null;
 
 function refreshTitle() {
     titleDesc.set!.call(document, settings.store.cleanTitle ? rawTitle.replace(COUNT_PREFIX, "") : rawTitle);
@@ -82,9 +83,21 @@ export default definePlugin({
             set: (v: string) => { rawTitle = String(v); refreshTitle(); }
         });
         refreshTitle();
+
+        // Discord a veces cambia el texto del <title> directamente (sin pasar por document.title)
+        titleObserver = new MutationObserver(() => {
+            const t = titleDesc.get!.call(document);
+            if (settings.store.cleanTitle && COUNT_PREFIX.test(t)) {
+                rawTitle = t;
+                refreshTitle();
+            }
+        });
+        titleObserver.observe(document.head, { subtree: true, childList: true, characterData: true });
     },
 
     stop() {
+        titleObserver?.disconnect();
+        titleObserver = null;
         delete (document as any).title;
         titleDesc.set!.call(document, rawTitle);
     }

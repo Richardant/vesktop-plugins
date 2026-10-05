@@ -17,11 +17,14 @@ export function setIcons(_: IpcMainInvokeEvent, data: Record<string, string>) {
 
 const img = (k: string) => nativeImage.createFromDataURL(icons[k] ?? "");
 
-export function update(e: IpcMainInvokeEvent, state: VoiceState | null) {
-    if (process.platform !== "win32") return;
-    const win = BrowserWindow.fromWebContents(e.sender);
-    if (!win || win.isDestroyed()) return;
+// Último estado por ventana, para volver a poner los botones si Windows los borra
+// (al ocultar/mostrar la ventana, minimizar a la bandeja, cambiar el icono, etc.)
+const lastState = new WeakMap<BrowserWindow, VoiceState | null>();
+const hooked = new WeakSet<BrowserWindow>();
 
+function apply(win: BrowserWindow) {
+    if (win.isDestroyed()) return;
+    const state = lastState.get(win) ?? null;
     if (!state) {
         win.setThumbarButtons([]);
         return;
@@ -40,5 +43,24 @@ export function update(e: IpcMainInvokeEvent, state: VoiceState | null) {
         { icon: img(state.deaf ? "deafOff" : "deafOn"), tooltip: state.deaf ? "Dejar de ensordecer" : "Ensordecer", click: run("deaf") },
         { icon: img("hangup"), tooltip: "Desconectar", click: run("disconnect") }
     ];
+    // Devuelve false si la ventana aún no tiene botón en la barra (p. ej. oculta en la bandeja)
     win.setThumbarButtons(buttons);
+}
+
+export function update(e: IpcMainInvokeEvent, state: VoiceState | null) {
+    if (process.platform !== "win32") return;
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (!win || win.isDestroyed()) return;
+
+    lastState.set(win, state);
+    if (!hooked.has(win)) {
+        hooked.add(win);
+        const reapply = () => setTimeout(() => apply(win), 300);
+        win.on("show", reapply);
+        win.on("restore", reapply);
+        win.on("focus", reapply);
+        // Por si Windows los borra sin avisar, revisarlos cada pocos segundos
+        const t = setInterval(() => { if (win.isDestroyed()) clearInterval(t); else if (lastState.get(win)) apply(win); }, 5000);
+    }
+    apply(win);
 }

@@ -30,7 +30,8 @@ const CSS = `
 .${BLOCK_CLASS} .vc-mgvp-more { margin-left: 6px; font-size: 12px; font-weight: 600; color: var(--text-normal, #dbdee1); }
 `;
 
-const CACHE_KEY = "vc-mgvp-icons";
+const CACHE_KEY = "vc-mgvp-icons-v2"; // v2: la v1 podía guardar fotos de perfil por error
+try { localStorage.removeItem("vc-mgvp-icons"); } catch { }
 let iconCache: { speaker?: string; screen?: string; } = {};
 try { iconCache = JSON.parse(localStorage.getItem(CACHE_KEY) ?? "{}"); } catch { }
 
@@ -43,13 +44,19 @@ function learnIcons(tip: HTMLElement, guildName: string, hasVoice: boolean, hasS
     const rows: Element[] = [];
     for (const svg of Array.from(tip.querySelectorAll("svg"))) {
         if (svg.closest(`.${BLOCK_CLASS}`)) continue;
+        // Solo iconos de verdad: Discord también dibuja las fotos de perfil dentro de <svg>
+        if (svg.querySelector("img, image, foreignObject") || svg.closest("foreignObject")) continue;
+        const r = svg.getBoundingClientRect();
+        if (r.width > 32 || r.height > 32) continue;
         // la fila es el ancestro más cercano que también contiene avatares
         let row: Element | null = svg.parentElement;
         while (row && row !== tip && !row.querySelector("img")) row = row.parentElement;
         if (!row || row === tip || row.textContent?.includes(guildName)) continue;
-        if (!rows.includes(row) && row.querySelector("svg") === svg) rows.push(row);
+        if (!rows.includes(row)) rows.push(row);
     }
-    const first = (r?: Element) => r?.querySelector("svg")?.outerHTML;
+    // primer icono "real" de la fila
+    const first = (r?: Element) => Array.from(r?.querySelectorAll("svg") ?? [])
+        .find(sv => !sv.querySelector("img, image, foreignObject") && !sv.closest("foreignObject"))?.outerHTML;
     let changed = false;
     if (hasVoice && hasStream && rows.length >= 2) {
         iconCache.speaker = first(rows[0]); iconCache.screen = first(rows[1]); changed = true;
@@ -70,9 +77,8 @@ function voiceUsers(guildId: string) {
         if (!vs?.channelId) continue;
         const ch = ChannelStore.getChannel(vs.channelId);
         if (!ch || !PermissionStore.can(PermissionsBits.VIEW_CHANNEL, ch)) continue;
-        // Igual que Discord: la fila de voice lleva a todos, la de stream solo a quien transmite
-        voice.push(vs.userId);
-        if (vs.selfStream) streaming.push(vs.userId);
+        // Cada persona aparece una sola vez: transmitiendo o en voice, nunca en ambas
+        (vs.selfStream ? streaming : voice).push(vs.userId);
     }
     return { voice, streaming };
 }

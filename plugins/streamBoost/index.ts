@@ -21,7 +21,8 @@ const settings = definePluginSettings({
         type: OptionType.SELECT,
         description: "Qué conservar cuando el PC o la conexión no dan para todo",
         options: [
-            { label: "Fluidez (mantener FPS) — recomendado para juegos", value: "maintain-framerate", default: true },
+            { label: "Fluidez y nitidez (mantener FPS y resolución; baja solo un poco la calidad de imagen si hace falta)", value: "maintain-framerate-and-resolution", default: true },
+            { label: "Fluidez (mantener FPS; puede bajar la resolución)", value: "maintain-framerate" },
             { label: "Equilibrado (comportamiento normal de Chromium)", value: "balanced" },
             { label: "Nitidez (mantener resolución, baja FPS)", value: "maintain-resolution" }
         ]
@@ -63,7 +64,7 @@ const settings = definePluginSettings({
     },
     pickerDefaults: {
         type: OptionType.BOOLEAN,
-        description: "Al abrir el selector de transmisión, marcar automáticamente 1080p, 60 FPS y \"Prefer Clarity\"",
+        description: "Al abrir el selector de transmisión, marcar automáticamente 1080p, 60 FPS y \"Prefer Smoothness\"",
         default: true
     },
     showStats: {
@@ -105,8 +106,8 @@ function checkPicker() {
 
         if (!settings.store.pickerDefaults) return;
         setTimeout(() => {
-            for (const label of ["1080", "60", "Prefer Clarity"]) findByText(root, label)?.click();
-            pickedHint = "detail";
+            for (const label of ["1080", "60", "Prefer Smoothness"]) findByText(root, label)?.click();
+            pickedHint = "motion";
         }, 50);
     });
 }
@@ -141,13 +142,20 @@ function isDisplayTrack(t: MediaStreamTrack | null): t is MediaStreamTrack {
     return "displaySurface" in s || /screen|window|web-contents/i.test(t.label);
 }
 
+// "maintain-framerate-and-resolution" solo existe en Chromium reciente; si no, usamos "maintain-framerate".
+let mfrUnsupported = false;
+function wantedPref() {
+    const p = settings.store.priority;
+    return p === "maintain-framerate-and-resolution" && mfrUnsupported ? "maintain-framerate" : p;
+}
+
 function wantedFps(track: MediaStreamTrack) {
     return settings.store.targetFps || Math.max(30, Math.round(track.getSettings().frameRate ?? 30));
 }
 
 function boostParams(p: RTCRtpSendParameters, track: MediaStreamTrack): RTCRtpSendParameters {
     const fps = wantedFps(track);
-    (p as any).degradationPreference = settings.store.priority;
+    (p as any).degradationPreference = wantedPref();
     const cap = Math.round(settings.store.maxBitrate * 1_000_000);
     for (const e of p.encodings ?? []) {
         if (e.active === false) continue;
@@ -161,7 +169,7 @@ function boostParams(p: RTCRtpSendParameters, track: MediaStreamTrack): RTCRtpSe
 }
 
 function needsBoost(p: RTCRtpSendParameters, track: MediaStreamTrack) {
-    if ((p as any).degradationPreference !== settings.store.priority) return true;
+    if ((p as any).degradationPreference !== wantedPref()) return true;
     const cap = Math.round(settings.store.maxBitrate * 1_000_000);
     const fps = wantedFps(track);
     return (p.encodings ?? []).some(e => e.active !== false && ((e.maxBitrate ?? 0) < cap || (e.maxFramerate ?? 0) < fps
@@ -445,10 +453,24 @@ export default definePlugin({
 
         origSetParams = RTCRtpSender.prototype.setParameters;
         RTCRtpSender.prototype.setParameters = function (this: RTCRtpSender, params: RTCRtpSendParameters, ...rest: any[]) {
+            let boosted = false;
             try {
-                if (isDisplayTrack(this.track) && params?.encodings?.length) boostParams(params, this.track);
+                if (isDisplayTrack(this.track) && params?.encodings?.length) { boostParams(params, this.track); boosted = true; }
             } catch (e) { logger.error(e); }
-            return (origSetParams as any).call(this, params, ...rest);
+            const retry = (e: any) => {
+                // Si este Chromium no conoce "maintain-framerate-and-resolution", reintentar con "maintain-framerate"
+                if (boosted && !mfrUnsupported && (params as any).degradationPreference === "maintain-framerate-and-resolution" && /degradationPreference/i.test(String(e))) {
+                    mfrUnsupported = true;
+                    (params as any).degradationPreference = "maintain-framerate";
+                    return (origSetParams as any).call(this, params, ...rest);
+                }
+                throw e;
+            };
+            try {
+                return Promise.resolve((origSetParams as any).call(this, params, ...rest)).catch(retry);
+            } catch (e) {
+                return Promise.resolve().then(() => retry(e));
+            }
         } as any;
 
         timer = setInterval(tick, 1000);

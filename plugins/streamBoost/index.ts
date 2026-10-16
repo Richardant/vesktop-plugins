@@ -184,6 +184,64 @@ async function probeGpu() {
     try { await Native.gpuDiagnostics(); } catch { }
 }
 
+// ---- Prueba de codificación (diagnóstico) ----
+// Codifica unos segundos con una conexión local (sin red) y anota si salen cuadros y con qué codificador.
+async function encodeTest(label: string, track: MediaStreamTrack, prof: string) {
+    const a = new RTCPeerConnection(), z = new RTCPeerConnection();
+    const res: any = { label, prof, settings: track.getSettings() };
+    try {
+        a.onicecandidate = e => e.candidate && z.addIceCandidate(e.candidate);
+        z.onicecandidate = e => e.candidate && a.addIceCandidate(e.candidate);
+        const tr = a.addTransceiver(track, { direction: "sendonly" });
+        const codecs = (RTCRtpSender.getCapabilities("video")?.codecs ?? []).filter(c => c.mimeType === "video/H264" && c.sdpFmtpLine?.includes("profile-level-id=" + prof) && c.sdpFmtpLine.includes("packetization-mode=1"));
+        res.codecFound = codecs.length;
+        if (!codecs.length) return res;
+        tr.setCodecPreferences(codecs);
+        await (origSLD as any).call(a);
+        await (origSRD as any).call(z, a.localDescription!);
+        await (origSLD as any).call(z);
+        await (origSRD as any).call(a, z.localDescription!);
+        await new Promise(r => setTimeout(r, 5000));
+        (await a.getStats()).forEach((x: any) => {
+            if (x.type === "outbound-rtp" && x.kind === "video")
+                Object.assign(res, { framesEncoded: x.framesEncoded, bytesSent: x.bytesSent, fps: x.framesPerSecond, w: x.frameWidth, h: x.frameHeight, impl: x.encoderImplementation, hw: x.powerEfficientEncoder, limit: x.qualityLimitationReason });
+        });
+    } catch (e) {
+        res.error = String(e);
+    } finally {
+        a.close(); z.close();
+    }
+    return res;
+}
+
+async function canvasSelfTest() {
+    const c = document.createElement("canvas");
+    c.width = 1592; c.height = 1040;
+    const ctx = c.getContext("2d")!;
+    let i = 0;
+    const iv = setInterval(() => { ctx.fillStyle = `hsl(${i++ * 7 % 360},80%,50%)`; ctx.fillRect(0, 0, c.width, c.height); }, 16);
+    try {
+        for (const prof of ["42e01f", "4d001f"]) {
+            const t = c.captureStream(60).getVideoTracks()[0];
+            await Native.saveSelfTest(await encodeTest("lienzo", t, prof));
+            t.stop();
+        }
+    } finally { clearInterval(iv); }
+}
+
+// Si la transmisión real usa la GPU pero no salen cuadros, probamos con una copia de la captura.
+let streamTested = false;
+async function streamSelfTest(track: MediaStreamTrack) {
+    if (streamTested) return;
+    streamTested = true;
+    for (const prof of ["4d001f", "42e01f"]) {
+        const t = track.clone();
+        await Native.saveSelfTest(await encodeTest("captura", t, prof));
+        t.stop();
+    }
+}
+
+const zeroSince = new WeakMap<RTCPeerConnection, number>();
 const prev = new WeakMap<RTCPeerConnection, { bytes: number; t: number; }>();
 let panel: HTMLDivElement | null = null;
 
@@ -223,6 +281,10 @@ async function collectStats() {
         const encs = sender?.getParameters().encodings ?? [];
         const layers = encs.map(e => (e as any).scalabilityMode ?? "L1T1").join("+") || "?";
         void probeGpu();
+        if (!out.framesEncoded) {
+            if (!zeroSince.has(pc)) zeroSince.set(pc, now);
+            else if (now - zeroSince.get(pc)! > 6000) void streamSelfTest(dTrack);
+        } else zeroSince.delete(pc);
         const hw = out.powerEfficientEncoder === true ? "por hardware (GPU)" : out.powerEfficientEncoder === false ? "por software (CPU)" : "";
 
         lines.push(
@@ -292,6 +354,7 @@ export default definePlugin({
         } as any;
 
         timer = setInterval(tick, 2000);
+        setTimeout(() => void canvasSelfTest().catch(e => logger.error("selftest", e)), 15000);
     },
 
     stop() {

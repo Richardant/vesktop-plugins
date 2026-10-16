@@ -40,6 +40,11 @@ const settings = definePluginSettings({
         default: 8,
         stickToMarkers: false
     },
+    forceGpu: {
+        type: OptionType.BOOLEAN,
+        description: "Intentar codificar con la tarjeta gráfica (quita las capas temporales que obligan a usar el procesador)",
+        default: true
+    },
     motionHint: {
         type: OptionType.BOOLEAN,
         description: "Marcar la transmisión como contenido en movimiento (juegos/video)",
@@ -75,6 +80,7 @@ function boostParams(p: RTCRtpSendParameters, track: MediaStreamTrack): RTCRtpSe
         if (e.active === false) continue;
         e.maxFramerate = Math.max(e.maxFramerate ?? 0, fps);
         if (!e.maxBitrate || e.maxBitrate < cap) e.maxBitrate = cap;
+        if (settings.store.forceGpu && (e as any).scalabilityMode && (e as any).scalabilityMode !== "L1T1") (e as any).scalabilityMode = "L1T1";
         (e as any).priority = "high";
         (e as any).networkPriority = "high";
     }
@@ -85,11 +91,12 @@ function needsBoost(p: RTCRtpSendParameters, track: MediaStreamTrack) {
     if ((p as any).degradationPreference !== settings.store.priority) return true;
     const cap = Math.round(settings.store.maxBitrate * 1_000_000);
     const fps = wantedFps(track);
-    return (p.encodings ?? []).some(e => e.active !== false && ((e.maxBitrate ?? 0) < cap || (e.maxFramerate ?? 0) < fps));
+    return (p.encodings ?? []).some(e => e.active !== false && ((e.maxBitrate ?? 0) < cap || (e.maxFramerate ?? 0) < fps
+        || (settings.store.forceGpu && (e as any).scalabilityMode && (e as any).scalabilityMode !== "L1T1")));
 }
 
-// Vesktop intenta poner los FPS elegidos con applyConstraints, pero si la resolución es "Source"
-// esa llamada falla y la captura se queda en 30 FPS. Aquí pedimos solo el frameRate.
+// Vesktop intenta poner los FPS elegidos con applyConstraints (pidiendo un mínimo de FPS), pero
+// a veces esa llamada falla y la captura se queda en 30 FPS. Aquí pedimos solo el frameRate.
 const fpsTried = new WeakMap<MediaStreamTrack, number>();
 async function ensureCaptureFps(track: MediaStreamTrack) {
     const target = settings.store.targetFps;
@@ -129,6 +136,23 @@ async function applyAll() {
 }
 
 // ---- Estadísticas ----
+// ¿Tiene Chromium un codificador H264 por GPU disponible? (se calcula una vez)
+let gpuH264: string | null = null;
+async function probeGpu() {
+    if (gpuH264 !== null) return;
+    gpuH264 = "?";
+    const parts: string[] = [];
+    try {
+        const r = await (window as any).VideoEncoder?.isConfigSupported({ codec: "avc1.42e01f", width: 1920, height: 1080, bitrate: 6e6, framerate: 60, hardwareAcceleration: "prefer-hardware" });
+        parts.push(`WebCodecs ${r?.supported ? "sí" : "no"}`);
+    } catch { parts.push("WebCodecs ?"); }
+    try {
+        const r = await navigator.mediaCapabilities.encodingInfo({ type: "webrtc", video: { contentType: "video/H264;profile-level-id=42e01f;packetization-mode=1", width: 1920, height: 1080, bitrate: 6e6, framerate: 60 } } as any);
+        parts.push(`WebRTC ${r.powerEfficient ? "sí" : "no"}`);
+    } catch { parts.push("WebRTC ?"); }
+    gpuH264 = parts.join(", ");
+}
+
 const prev = new WeakMap<RTCPeerConnection, { bytes: number; t: number; }>();
 let panel: HTMLDivElement | null = null;
 
@@ -161,12 +185,17 @@ async function collectStats() {
         prev.set(pc, { bytes: out.bytesSent ?? 0, t: now });
         const mbps = last ? (((out.bytesSent ?? 0) - last.bytes) * 8 / ((now - last.t) / 1000) / 1e6) : 0;
         const codec = codecs.get(out.codecId)?.mimeType?.replace("video/", "") ?? "?";
+        const sender = pc.getSenders().find(s => s.track === dTrack);
+        const encs = sender?.getParameters().encodings ?? [];
+        const layers = encs.map(e => (e as any).scalabilityMode ?? "L1T1").join("+") || "?";
+        void probeGpu();
         const hw = out.powerEfficientEncoder === true ? "por hardware (GPU)" : out.powerEfficientEncoder === false ? "por software (CPU)" : "";
 
         lines.push(
             `${out.frameWidth ?? "?"}×${out.frameHeight ?? "?"} · ${Math.round(out.framesPerSecond ?? 0)} FPS (captura: ${Math.round(captureFps)}) · ${mbps.toFixed(1)} Mbps`,
             `Codificador: ${codec} ${hw}${out.encoderImplementation ? ` (${out.encoderImplementation})` : ""}`,
-            `Limitado por: ${REASONS[out.qualityLimitationReason] ?? out.qualityLimitationReason ?? "?"}`
+            `Limitado por: ${REASONS[out.qualityLimitationReason] ?? out.qualityLimitationReason ?? "?"}`,
+            `Capas: ${layers}${encs.length > 1 ? ` (${encs.length} calidades)` : ""} · GPU H264: ${gpuH264 ?? "…"}`
         );
     }
     return lines;

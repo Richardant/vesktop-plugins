@@ -7,7 +7,7 @@
 import { definePluginSettings } from "@api/Settings";
 import { Logger } from "@utils/Logger";
 import definePlugin, { OptionType, PluginNative } from "@utils/types";
-import { showToast, Toasts } from "@webpack/common";
+import { showToast } from "@webpack/common";
 
 const Native = VencordNative.pluginHelpers.AppAudioShare as PluginNative<typeof import("./native")>;
 const logger = new Logger("AppAudioShare");
@@ -114,14 +114,14 @@ async function patchedGetDisplayMedia(this: MediaDevices, opts?: DisplayMediaStr
 
         if (!target.exclude && /^(ApplicationFrameHost|vesktop)$/i.test(target.name)) {
             if (settings.store.showToast)
-                showToast(`No se puede aislar el audio de ${target.name}; se transmite el de todo el escritorio`, Toasts.Type.MESSAGE);
+                showToast({ text: `No se puede aislar el audio de ${target.name}; se transmite el de todo el escritorio`, variant: "default" });
             return stream;
         }
 
         const res = await Native.startCapture(target.pid, !!target.exclude);
         if (!res.ok) {
             logger.error("No se pudo capturar el audio de la app:", res.error);
-            showToast("AppAudioShare: no se pudo capturar el audio de la app, se usa el del escritorio", Toasts.Type.FAILURE);
+            showToast({ text: "AppAudioShare: no se pudo capturar el audio de la app, se usa el del escritorio", variant: "critical" });
             return stream;
         }
 
@@ -141,7 +141,7 @@ async function patchedGetDisplayMedia(this: MediaDevices, opts?: DisplayMediaStr
         }
 
         if (settings.store.showToast)
-            showToast(target.exclude ? `Transmitiendo audio de ${target.name}` : `Transmitiendo solo el audio de: ${target.name}`, Toasts.Type.SUCCESS);
+            showToast({ text: target.exclude ? `Transmitiendo audio de ${target.name}` : `Transmitiendo solo el audio de: ${target.name}`, variant: "success" });
     } catch (e) {
         logger.error("Error, se deja el audio original", e);
     }

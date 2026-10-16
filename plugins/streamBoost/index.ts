@@ -10,7 +10,9 @@
 
 import { definePluginSettings } from "@api/Settings";
 import { Logger } from "@utils/Logger";
-import definePlugin, { OptionType } from "@utils/types";
+import definePlugin, { OptionType, PluginNative } from "@utils/types";
+
+const Native = VencordNative.pluginHelpers.StreamBoost as PluginNative<typeof import("./native")>;
 
 const logger = new Logger("StreamBoost");
 
@@ -151,6 +153,7 @@ async function probeGpu() {
         parts.push(`WebRTC ${r.powerEfficient ? "sí" : "no"}`);
     } catch { parts.push("WebRTC ?"); }
     gpuH264 = parts.join(", ");
+    try { await Native.gpuDiagnostics(); } catch { }
 }
 
 const prev = new WeakMap<RTCPeerConnection, { bytes: number; t: number; }>();

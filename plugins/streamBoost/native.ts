@@ -42,3 +42,12 @@ app.whenReady().then(() => setTimeout(save, 15000));
 export function gpuDiagnostics(_: IpcMainInvokeEvent) {
     return save();
 }
+
+const SELFTEST = join(__dirname, "streamBoost-selftest.json");
+let selfTests: any[] = [];
+/** Guarda resultados de las pruebas de codificación hechas en Vesktop. */
+export function saveSelfTest(_: IpcMainInvokeEvent, data: any) {
+    selfTests.push({ fecha: new Date().toISOString(), ...data });
+    if (selfTests.length > 20) selfTests = selfTests.slice(-20);
+    try { writeFileSync(SELFTEST, JSON.stringify(selfTests, null, 2)); } catch { }
+}

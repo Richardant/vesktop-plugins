@@ -58,7 +58,12 @@ const settings = definePluginSettings({
     },
     motionHint: {
         type: OptionType.BOOLEAN,
-        description: "Marcar la transmisión como contenido en movimiento (juegos/video)",
+        description: "Marcar la transmisión como contenido en movimiento (juegos/video), salvo que elijas \"Prefer Clarity\" en el selector",
+        default: true
+    },
+    pickerDefaults: {
+        type: OptionType.BOOLEAN,
+        description: "Al abrir el selector de transmisión, marcar automáticamente 1080p, 60 FPS y \"Prefer Clarity\"",
         default: true
     },
     showStats: {
@@ -67,6 +72,44 @@ const settings = definePluginSettings({
         default: true
     }
 });
+
+// ---- Valores por defecto del selector de transmisión de Vesktop ----
+// El selector es de Vesktop (no de Discord), así que lo ajustamos haciendo clic en sus opciones.
+let pickedHint: "motion" | "detail" | null = null;
+const handledPickers = new WeakSet<Element>();
+let pickerObserver: MutationObserver | null = null;
+
+function findByText(root: Element, text: string) {
+    const all = root.querySelectorAll<HTMLElement>("button, [role=radio], [role=button], div, span");
+    for (const el of all) {
+        if (el.childElementCount === 0 && el.textContent?.trim() === text) return el;
+    }
+    return null;
+}
+
+let pickerRaf = 0;
+function checkPicker() {
+    if (pickerRaf) return;
+    pickerRaf = requestAnimationFrame(() => {
+        pickerRaf = 0;
+        // Sección de calidad del selector de Vesktop (clase "vcd-screen-picker-quality")
+        const quality = document.querySelector('[class*="vcd-screen-picker-quality"]');
+        if (!quality) return;
+        const root = quality.closest('[class*="vcd-screen-picker"][class*="modal"], [role=dialog]') ?? quality.parentElement ?? quality;
+        if (handledPickers.has(root)) return;
+        handledPickers.add(root);
+
+        // Recordar qué tipo de contenido elige el usuario
+        for (const [label, hint] of [["Prefer Smoothness", "motion"], ["Prefer Clarity", "detail"]] as const)
+            findByText(root, label)?.addEventListener("click", () => { pickedHint = hint; }, true);
+
+        if (!settings.store.pickerDefaults) return;
+        setTimeout(() => {
+            for (const label of ["1080", "60", "Prefer Clarity"]) findByText(root, label)?.click();
+            pickedHint = "detail";
+        }, 50);
+    });
+}
 
 // ---- Conexiones WebRTC que Discord crea ----
 const pcs = new Set<RTCPeerConnection>();
@@ -152,7 +195,8 @@ async function applyAll() {
         for (const sender of pc.getSenders()) {
             const track = sender.track;
             if (!isDisplayTrack(track)) continue;
-            if (settings.store.motionHint && track.contentHint !== "motion") track.contentHint = "motion";
+            const hint = pickedHint === "detail" ? "detail" : settings.store.motionHint ? "motion" : null;
+            if (hint && track.contentHint !== hint) track.contentHint = hint;
             await ensureCaptureFps(track);
             try {
                 const p = sender.getParameters();
@@ -241,6 +285,19 @@ async function streamSelfTest(track: MediaStreamTrack) {
     }
 }
 
+// Si el codificador por GPU arranca pero no saca cuadros, lo reiniciamos quitando y volviendo a poner la imagen.
+const recovered = new WeakSet<RTCPeerConnection>();
+async function recoverEncoder(pc: RTCPeerConnection, sender: RTCRtpSender | undefined, track: MediaStreamTrack) {
+    if (!sender || recovered.has(pc)) return;
+    recovered.add(pc);
+    try {
+        await sender.replaceTrack(null);
+        await new Promise(r => setTimeout(r, 300));
+        await sender.replaceTrack(track);
+        logger.info("Codificador reiniciado");
+    } catch (e) { logger.warn("No se pudo reiniciar el codificador", e); }
+}
+
 const zeroSince = new WeakMap<RTCPeerConnection, number>();
 const prev = new WeakMap<RTCPeerConnection, { bytes: number; t: number; }>();
 let panel: HTMLDivElement | null = null;
@@ -283,7 +340,10 @@ async function collectStats() {
         void probeGpu();
         if (!out.framesEncoded) {
             if (!zeroSince.has(pc)) zeroSince.set(pc, now);
-            else if (now - zeroSince.get(pc)! > 6000) void streamSelfTest(dTrack);
+            else if (now - zeroSince.get(pc)! > 5000) {
+                if (!recovered.has(pc)) void recoverEncoder(pc, sender, dTrack);
+                else if (now - zeroSince.get(pc)! > 12000) void streamSelfTest(dTrack);
+            }
         } else zeroSince.delete(pc);
         const hw = out.powerEfficientEncoder === true ? "por hardware (GPU)" : out.powerEfficientEncoder === false ? "por software (CPU)" : "";
 
@@ -354,6 +414,8 @@ export default definePlugin({
         } as any;
 
         timer = setInterval(tick, 2000);
+        pickerObserver = new MutationObserver(() => checkPicker());
+        pickerObserver.observe(document.body, { childList: true, subtree: true });
         setTimeout(() => void canvasSelfTest().catch(e => logger.error("selftest", e)), 15000);
     },
 
@@ -365,6 +427,8 @@ export default definePlugin({
         origSLD = origSetParams = null;
         if (timer) clearInterval(timer);
         timer = null;
+        pickerObserver?.disconnect();
+        pickerObserver = null;
         panel?.remove();
         panel = null;
     }

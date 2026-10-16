@@ -8,7 +8,7 @@
  *   usando el addon nativo "loopback-capture" (MIT, WerdoxDev).
  */
 
-import { execFile } from "child_process";
+import { ChildProcess, execFile, spawn } from "child_process";
 import { app, desktopCapturer, ipcMain, IpcMainInvokeEvent } from "electron";
 import { existsSync } from "fs";
 import { join } from "path";
@@ -70,16 +70,121 @@ const PS_SCRIPT =
     "$n=(Get-Process -Id $p -ErrorAction SilentlyContinue).ProcessName;" +
     "Write-Output ($p.ToString() + '|' + $n + '|' + $how)";
 
-async function resolveTarget(sourceId: string, hwnd: string): Promise<Target | null> {
-    // Título de la ventana elegida, según Electron
-    let title = "";
+// PowerShell tarda varios segundos en arrancar y compilar el C# (y eso retrasaba el inicio de la transmisión).
+// Por eso dejamos un PowerShell "precalentado" esperando consultas: cada respuesta tarda milisegundos.
+const PS_WORKER =
+    "Add-Type -TypeDefinition $env:AAS_CS;" +
+    "[Console]::Out.WriteLine('READY');" +
+    "while(($l=[Console]::In.ReadLine()) -ne $null){" +
+    "$x=$l.Split([char]9);" +
+    "$t=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($x[1]));" +
+    "$p=[VcAasWin]::ByHwnd([int64]$x[0]);$how='hwnd';" +
+    "if($p -eq 0){$p=[VcAasWin]::ByTitle($t);$how='titulo'};" +
+    "$n=(Get-Process -Id $p -ErrorAction SilentlyContinue).ProcessName;" +
+    "[Console]::Out.WriteLine($p.ToString() + '|' + $n + '|' + $how)}";
+
+let worker: ChildProcess | null = null;
+let workerReady = false;
+let workerBuf = "";
+const workerQueue: ((line: string | null) => void)[] = [];
+
+function startWorker() {
+    if (worker || process.platform !== "win32") return;
+    try {
+        const w = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", PS_WORKER], {
+            windowsHide: true,
+            env: { ...process.env, AAS_CS: CS_SOURCE },
+            stdio: ["pipe", "pipe", "ignore"]
+        });
+        worker = w;
+        workerReady = false;
+        workerBuf = "";
+        w.stdout!.setEncoding("utf8");
+        w.stdout!.on("data", (d: string) => {
+            workerBuf += d;
+            let i: number;
+            while ((i = workerBuf.indexOf("\n")) >= 0) {
+                const line = workerBuf.slice(0, i).trim();
+                workerBuf = workerBuf.slice(i + 1);
+                if (!line) continue;
+                if (line === "READY") { workerReady = true; continue; }
+                workerQueue.shift()?.(line);
+            }
+        });
+        w.on("exit", () => {
+            if (worker === w) { worker = null; workerReady = false; }
+            while (workerQueue.length) workerQueue.shift()!(null);
+        });
+        w.on("error", () => { if (worker === w) { worker = null; workerReady = false; } });
+        w.unref();
+    } catch (e) {
+        lastDebug = `no se pudo iniciar PowerShell: ${e}`;
+        worker = null;
+    }
+}
+
+function stopWorker() {
+    try { worker?.kill(); } catch { }
+    worker = null;
+    workerReady = false;
+}
+
+function askWorker(hwnd: string, title: string): Promise<string | null> {
+    if (!worker || !workerReady || !worker.stdin?.writable) return Promise.resolve(null);
+    return new Promise(resolve => {
+        let done = false;
+        const finish = (v: string | null) => { if (!done) { done = true; resolve(v); } };
+        workerQueue.push(finish);
+        setTimeout(() => {
+            const idx = workerQueue.indexOf(finish);
+            if (idx >= 0) workerQueue.splice(idx, 1);
+            finish(null);
+        }, 3000);
+        worker!.stdin!.write(`${hwnd.replace(/\D/g, "")}\t${Buffer.from(title, "utf8").toString("base64")}\n`);
+    });
+}
+
+// Arrancamos el PowerShell auxiliar poco después de abrir Vesktop y lo cerramos al salir.
+app.whenReady().then(() => setTimeout(startWorker, 8000));
+app.on("will-quit", stopWorker);
+
+function parseAnswer(out: string, hwnd: string, title: string, via: string): Target | null {
+    const [pid, name, how] = out.trim().split("|");
+    const n = Number(pid);
+    lastDebug = `hwnd=${hwnd} titulo="${title}" -> pid=${pid} (${name}) via ${how} [${via}]`;
+    return n > 0 ? { pid: n, name: name || "desconocido" } : null;
+}
+
+async function windowTitle(sourceId: string) {
     try {
         const sources = await desktopCapturer.getSources({ types: ["window"], thumbnailSize: { width: 0, height: 0 } });
-        title = sources.find(s => s.id === sourceId)?.name ?? "";
+        return sources.find(s => s.id === sourceId)?.name ?? "";
     } catch (e) {
         lastDebug = `getSources falló: ${e}`;
+        return "";
+    }
+}
+
+async function resolveTarget(sourceId: string, hwnd: string): Promise<Target | null> {
+    const t0 = Date.now();
+
+    // 1) Rápido: PowerShell precalentado, solo con el HWND (casi siempre basta)
+    const fast = await askWorker(hwnd, "");
+    if (fast) {
+        const r = parseAnswer(fast, hwnd, "", `rápido ${Date.now() - t0} ms`);
+        if (r) return r;
     }
 
+    // El título solo hace falta si el HWND no sirvió (listar ventanas tarda un poco)
+    const title = await windowTitle(sourceId);
+    if (fast && title) {
+        const again = await askWorker(hwnd, title);
+        const r = again && parseAnswer(again, hwnd, title, `rápido+título ${Date.now() - t0} ms`);
+        if (r) return r;
+    }
+    if (!worker) startWorker(); // para la próxima vez
+
+    // 2) Respaldo: PowerShell de un solo uso (lento)
     return new Promise(resolve => {
         execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", PS_SCRIPT], {
             windowsHide: true,
@@ -87,10 +192,7 @@ async function resolveTarget(sourceId: string, hwnd: string): Promise<Target | n
             env: { ...process.env, AAS_CS: CS_SOURCE, AAS_HWND: hwnd, AAS_TITLE: title }
         }, (err, stdout, stderr) => {
             if (err) { lastDebug = `PowerShell falló: ${err} | ${stderr}`; return resolve(null); }
-            const [pid, name, how] = stdout.trim().split("|");
-            const n = Number(pid);
-            lastDebug = `hwnd=${hwnd} titulo="${title}" -> pid=${pid} (${name}) via ${how}`;
-            resolve(n > 0 ? { pid: n, name: name || "desconocido" } : null);
+            resolve(parseAnswer(stdout, hwnd, title, `lento ${Date.now() - t0} ms`));
         });
     });
 }

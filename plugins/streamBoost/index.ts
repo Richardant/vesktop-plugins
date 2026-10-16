@@ -24,6 +24,15 @@ const settings = definePluginSettings({
             { label: "Nitidez (mantener resolución, baja FPS)", value: "maintain-resolution" }
         ]
     },
+    targetFps: {
+        type: OptionType.SELECT,
+        description: "FPS de la captura (fuerza este valor aunque Vesktop no lo aplique)",
+        options: [
+            { label: "60 FPS", value: 60, default: true },
+            { label: "30 FPS", value: 30 },
+            { label: "No tocar (usar lo que elija Vesktop)", value: 0 }
+        ]
+    },
     maxBitrate: {
         type: OptionType.SLIDER,
         description: "Bitrate máximo del video (Mbps). Más alto = mejor calidad si tu internet de subida lo aguanta",
@@ -54,8 +63,12 @@ function isDisplayTrack(t: MediaStreamTrack | null): t is MediaStreamTrack {
     return "displaySurface" in s || /screen|window|web-contents/i.test(t.label);
 }
 
+function wantedFps(track: MediaStreamTrack) {
+    return settings.store.targetFps || Math.max(30, Math.round(track.getSettings().frameRate ?? 30));
+}
+
 function boostParams(p: RTCRtpSendParameters, track: MediaStreamTrack): RTCRtpSendParameters {
-    const fps = Math.max(30, Math.round((track.getSettings().frameRate ?? 60)));
+    const fps = wantedFps(track);
     (p as any).degradationPreference = settings.store.priority;
     const cap = Math.round(settings.store.maxBitrate * 1_000_000);
     for (const e of p.encodings ?? []) {
@@ -71,8 +84,29 @@ function boostParams(p: RTCRtpSendParameters, track: MediaStreamTrack): RTCRtpSe
 function needsBoost(p: RTCRtpSendParameters, track: MediaStreamTrack) {
     if ((p as any).degradationPreference !== settings.store.priority) return true;
     const cap = Math.round(settings.store.maxBitrate * 1_000_000);
-    const fps = Math.max(30, Math.round((track.getSettings().frameRate ?? 60)));
+    const fps = wantedFps(track);
     return (p.encodings ?? []).some(e => e.active !== false && ((e.maxBitrate ?? 0) < cap || (e.maxFramerate ?? 0) < fps));
+}
+
+// Vesktop intenta poner los FPS elegidos con applyConstraints, pero si la resolución es "Source"
+// esa llamada falla y la captura se queda en 30 FPS. Aquí pedimos solo el frameRate.
+const fpsTried = new WeakMap<MediaStreamTrack, number>();
+async function ensureCaptureFps(track: MediaStreamTrack) {
+    const target = settings.store.targetFps;
+    if (!target) return;
+    const current = track.getSettings().frameRate ?? 0;
+    if (current >= target - 1 || fpsTried.get(track) === target) return;
+    fpsTried.set(track, target);
+    const base = { ...track.getConstraints() } as MediaTrackConstraints;
+    for (const k of ["width", "height", "advanced"] as const)
+        if (JSON.stringify(base[k] ?? null).includes("null")) delete base[k]; // valores inválidos (NaN)
+    try {
+        await track.applyConstraints({ ...base, frameRate: { ideal: target, max: target } });
+    } catch {
+        try { await track.applyConstraints({ frameRate: { ideal: target, max: target } }); }
+        catch (e) { logger.warn("No se pudo subir los FPS de la captura", e); }
+    }
+    logger.info("FPS de captura:", track.getSettings().frameRate);
 }
 
 async function applyAll() {
@@ -82,6 +116,7 @@ async function applyAll() {
             const track = sender.track;
             if (!isDisplayTrack(track)) continue;
             if (settings.store.motionHint && track.contentHint !== "motion") track.contentHint = "motion";
+            await ensureCaptureFps(track);
             try {
                 const p = sender.getParameters();
                 if (!p.encodings?.length || !needsBoost(p, track)) continue;
@@ -107,7 +142,9 @@ const REASONS: Record<string, string> = {
 async function collectStats() {
     const lines: string[] = [];
     for (const pc of pcs) {
-        if (!pc.getSenders().some(s => isDisplayTrack(s.track))) continue;
+        const dTrack = pc.getSenders().map(s => s.track).find(isDisplayTrack);
+        if (!dTrack) continue;
+        const captureFps = dTrack.getSettings().frameRate ?? 0;
         let report: RTCStatsReport;
         try { report = await pc.getStats(); } catch { continue; }
 
@@ -127,7 +164,7 @@ async function collectStats() {
         const hw = out.powerEfficientEncoder === true ? "por hardware (GPU)" : out.powerEfficientEncoder === false ? "por software (CPU)" : "";
 
         lines.push(
-            `${out.frameWidth ?? "?"}×${out.frameHeight ?? "?"} · ${Math.round(out.framesPerSecond ?? 0)} FPS · ${mbps.toFixed(1)} Mbps`,
+            `${out.frameWidth ?? "?"}×${out.frameHeight ?? "?"} · ${Math.round(out.framesPerSecond ?? 0)} FPS (captura: ${Math.round(captureFps)}) · ${mbps.toFixed(1)} Mbps`,
             `Codificador: ${codec} ${hw}${out.encoderImplementation ? ` (${out.encoderImplementation})` : ""}`,
             `Limitado por: ${REASONS[out.qualityLimitationReason] ?? out.qualityLimitationReason ?? "?"}`
         );

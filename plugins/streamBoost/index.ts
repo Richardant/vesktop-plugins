@@ -47,10 +47,14 @@ const settings = definePluginSettings({
         description: "Intentar codificar con la tarjeta gráfica (quita las capas temporales que obligan a usar el procesador)",
         default: true
     },
-    gpuProfile: {
-        type: OptionType.BOOLEAN,
-        description: "Usar el perfil H264 \"Baseline\" (tu tarjeta lo codifica por hardware) en vez de \"Constrained Baseline\" (solo por procesador). Requiere volver a empezar la transmisión",
-        default: true
+    h264Profile: {
+        type: OptionType.SELECT,
+        description: "Perfil H264 de la transmisión. Discord usa \"Constrained Baseline\", que en tu PC solo se codifica con el procesador. Los otros usan la tarjeta gráfica (experimental). Requiere volver a empezar la transmisión",
+        options: [
+            { label: "Constrained Baseline — procesador (normal de Discord, el más estable)", value: "", default: true },
+            { label: "Main — tarjeta gráfica (experimental)", value: "4d00" },
+            { label: "Baseline — tarjeta gráfica (experimental; en tu PC congeló la transmisión)", value: "4200" }
+        ]
     },
     motionHint: {
         type: OptionType.BOOLEAN,
@@ -71,17 +75,18 @@ let origSetParams: RTCRtpSender["setParameters"] | null = null;
 let origSRD: RTCPeerConnection["setRemoteDescription"] | null = null;
 
 // Discord pide H264 "Constrained Baseline" (42e0xx). En Windows, Chromium solo tiene codificador por GPU
-// para Baseline/Main/High, así que cae a OpenH264 (procesador). Cambiamos el perfil a Baseline (4200xx),
-// que cualquier decodificador reproduce igual. Se cambia en ambas descripciones de la misma conexión.
+// para Baseline/Main/High, así que cae a OpenH264 (procesador). Opcionalmente cambiamos el perfil
+// (Main 4d00xx o Baseline 4200xx). Se cambia en ambas descripciones de la misma conexión.
 const H264_CBP = /profile-level-id=42e0([0-9a-f]{2})/gi;
 const mungedPcs = new WeakSet<RTCPeerConnection>();
 function mungeDesc(pc: RTCPeerConnection, desc: any, first: boolean) {
-    if (!settings.store.gpuProfile || !desc?.sdp || typeof desc.sdp !== "string") return desc;
+    const prefix = settings.store.h264Profile;
+    if (!prefix || !desc?.sdp || typeof desc.sdp !== "string") return desc;
     if (!first && !mungedPcs.has(pc)) return desc;
     if (!H264_CBP.test(desc.sdp)) return desc;
     H264_CBP.lastIndex = 0;
     mungedPcs.add(pc);
-    return { type: desc.type, sdp: desc.sdp.replace(H264_CBP, "profile-level-id=4200$1") };
+    return { type: desc.type, sdp: desc.sdp.replace(H264_CBP, `profile-level-id=${prefix}$1`) };
 }
 function isFirstDesc(pc: RTCPeerConnection) {
     return !pc.currentLocalDescription && !pc.currentRemoteDescription && !pc.pendingLocalDescription && !pc.pendingRemoteDescription;

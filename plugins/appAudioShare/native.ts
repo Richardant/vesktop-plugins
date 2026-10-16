@@ -9,7 +9,7 @@
  */
 
 import { execFile } from "child_process";
-import { desktopCapturer, ipcMain, IpcMainInvokeEvent } from "electron";
+import { app, desktopCapturer, ipcMain, IpcMainInvokeEvent } from "electron";
 import { existsSync } from "fs";
 import { join } from "path";
 
@@ -145,6 +145,9 @@ setInterval(() => {
     const now = Date.now();
     for (const [id, s] of sessions) if (now - s.lastRead > 10_000) stopSession(id);
 }, 5_000).unref?.();
+
+// Al salir de Vesktop, cerrar las capturas de audio para que el proceso termine limpio.
+app.on("will-quit", () => { for (const id of [...sessions.keys()]) stopSession(id); });
 
 export function startCapture(_: IpcMainInvokeEvent, pid: number, exclude = false): { ok: boolean; id?: number; error?: string; } {
     try {

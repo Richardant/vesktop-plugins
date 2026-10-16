@@ -6,7 +6,7 @@
 import { definePluginSettings } from "@api/Settings";
 import { Button } from "@components/Button";
 import definePlugin, { OptionType, PluginNative } from "@utils/types";
-import { showToast, Toasts, useEffect, useState } from "@webpack/common";
+import { showToast, useEffect, useState } from "@webpack/common";
 
 const Native = VencordNative.pluginHelpers.CustomAppIcon as PluginNative<typeof import("./native")>;
 
@@ -17,15 +17,15 @@ function IconPicker() {
     const choose = async () => {
         try {
             const p = await Native.chooseIcon();
-            if (p) { setPath(p); showToast("Icono aplicado", Toasts.Type.SUCCESS); }
+            if (p) { setPath(p); showToast({ text: "Icono aplicado", variant: "success" }); }
         } catch (e) {
-            showToast(String(e), Toasts.Type.FAILURE);
+            showToast({ text: String(e), variant: "critical" });
         }
     };
     const reset = async () => {
         await Native.resetIcon();
         setPath(null);
-        showToast("Icono restablecido (puede requerir reiniciar Vesktop)", Toasts.Type.MESSAGE);
+        showToast({ text: "Icono restablecido (puede requerir reiniciar Vesktop)", variant: "default" });
     };
 
     return (

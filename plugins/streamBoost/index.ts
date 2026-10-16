@@ -47,6 +47,11 @@ const settings = definePluginSettings({
         description: "Intentar codificar con la tarjeta gráfica (quita las capas temporales que obligan a usar el procesador)",
         default: true
     },
+    gpuProfile: {
+        type: OptionType.BOOLEAN,
+        description: "Usar el perfil H264 \"Baseline\" (tu tarjeta lo codifica por hardware) en vez de \"Constrained Baseline\" (solo por procesador). Requiere volver a empezar la transmisión",
+        default: true
+    },
     motionHint: {
         type: OptionType.BOOLEAN,
         description: "Marcar la transmisión como contenido en movimiento (juegos/video)",
@@ -63,6 +68,24 @@ const settings = definePluginSettings({
 const pcs = new Set<RTCPeerConnection>();
 let origSLD: RTCPeerConnection["setLocalDescription"] | null = null;
 let origSetParams: RTCRtpSender["setParameters"] | null = null;
+let origSRD: RTCPeerConnection["setRemoteDescription"] | null = null;
+
+// Discord pide H264 "Constrained Baseline" (42e0xx). En Windows, Chromium solo tiene codificador por GPU
+// para Baseline/Main/High, así que cae a OpenH264 (procesador). Cambiamos el perfil a Baseline (4200xx),
+// que cualquier decodificador reproduce igual. Se cambia en ambas descripciones de la misma conexión.
+const H264_CBP = /profile-level-id=42e0([0-9a-f]{2})/gi;
+const mungedPcs = new WeakSet<RTCPeerConnection>();
+function mungeDesc(pc: RTCPeerConnection, desc: any, first: boolean) {
+    if (!settings.store.gpuProfile || !desc?.sdp || typeof desc.sdp !== "string") return desc;
+    if (!first && !mungedPcs.has(pc)) return desc;
+    if (!H264_CBP.test(desc.sdp)) return desc;
+    H264_CBP.lastIndex = 0;
+    mungedPcs.add(pc);
+    return { type: desc.type, sdp: desc.sdp.replace(H264_CBP, "profile-level-id=4200$1") };
+}
+function isFirstDesc(pc: RTCPeerConnection) {
+    return !pc.currentLocalDescription && !pc.currentRemoteDescription && !pc.pendingLocalDescription && !pc.pendingRemoteDescription;
+}
 
 function isDisplayTrack(t: MediaStreamTrack | null): t is MediaStreamTrack {
     if (!t || t.kind !== "video" || t.readyState !== "live") return false;
@@ -187,7 +210,10 @@ async function collectStats() {
         const last = prev.get(pc);
         prev.set(pc, { bytes: out.bytesSent ?? 0, t: now });
         const mbps = last ? (((out.bytesSent ?? 0) - last.bytes) * 8 / ((now - last.t) / 1000) / 1e6) : 0;
-        const codec = codecs.get(out.codecId)?.mimeType?.replace("video/", "") ?? "?";
+        const codecInfo = codecs.get(out.codecId);
+        const plid = /profile-level-id=([0-9a-f]{6})/i.exec(codecInfo?.sdpFmtpLine ?? "")?.[1]?.toLowerCase();
+        const profile = !plid ? "" : plid.startsWith("42e0") ? " Constrained Baseline" : plid.startsWith("42") ? " Baseline" : plid.startsWith("4d") ? " Main" : plid.startsWith("64") ? " High" : ` ${plid}`;
+        const codec = (codecInfo?.mimeType?.replace("video/", "") ?? "?") + profile;
         const sender = pc.getSenders().find(s => s.track === dTrack);
         const encs = sender?.getParameters().encodings ?? [];
         const layers = encs.map(e => (e as any).scalabilityMode ?? "L1T1").join("+") || "?";
@@ -240,9 +266,16 @@ export default definePlugin({
         origSLD = RTCPeerConnection.prototype.setLocalDescription;
         RTCPeerConnection.prototype.setLocalDescription = function (this: RTCPeerConnection, ...args: any[]) {
             pcs.add(this);
+            try { if (args[0]) args[0] = mungeDesc(this, args[0], isFirstDesc(this) || mungedPcs.has(this)); } catch { }
             const r = (origSLD as any).apply(this, args);
             Promise.resolve(r).then(() => setTimeout(tick, 200), () => { });
             return r;
+        } as any;
+
+        origSRD = RTCPeerConnection.prototype.setRemoteDescription;
+        RTCPeerConnection.prototype.setRemoteDescription = function (this: RTCPeerConnection, ...args: any[]) {
+            try { if (args[0]) args[0] = mungeDesc(this, args[0], isFirstDesc(this) || mungedPcs.has(this)); } catch { }
+            return (origSRD as any).apply(this, args);
         } as any;
 
         origSetParams = RTCRtpSender.prototype.setParameters;
@@ -259,6 +292,8 @@ export default definePlugin({
     stop() {
         if (origSLD) RTCPeerConnection.prototype.setLocalDescription = origSLD;
         if (origSetParams) RTCRtpSender.prototype.setParameters = origSetParams;
+        if (origSRD) RTCPeerConnection.prototype.setRemoteDescription = origSRD;
+        origSRD = null;
         origSLD = origSetParams = null;
         if (timer) clearInterval(timer);
         timer = null;

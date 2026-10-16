@@ -6,7 +6,7 @@
 import { Logger } from "@utils/Logger";
 import definePlugin, { PluginNative } from "@utils/types";
 import { findByPropsLazy } from "@webpack";
-import { MediaEngineStore, SelectedChannelStore, showToast, Toasts } from "@webpack/common";
+import { MediaEngineStore, SelectedChannelStore, showToast } from "@webpack/common";
 
 const Native = VencordNative.pluginHelpers.VoiceThumbarButtons as PluginNative<typeof import("./native")>;
 const logger = new Logger("VoiceThumbarButtons");
@@ -79,7 +79,7 @@ export default definePlugin({
             }
         } catch (e) {
             logger.error("Acción fallida:", action, e);
-            showToast(`No se pudo ejecutar: ${action}`, Toasts.Type.FAILURE);
+            showToast({ text: `No se pudo ejecutar: ${action}`, variant: "critical" });
         }
         setTimeout(sync, 100);
     },

@@ -4,7 +4,7 @@
  * La imagen se copia junto a los archivos de Vencord y se aplica a cada ventana nueva.
  */
 
-import { app, BrowserWindow, dialog, IpcMainInvokeEvent, nativeImage, NativeImage } from "electron";
+import { app, BrowserWindow, dialog, IpcMainInvokeEvent, nativeImage, NativeImage, Tray } from "electron";
 import { copyFileSync, existsSync, readdirSync, rmSync } from "fs";
 import { extname, join } from "path";
 
@@ -34,6 +34,31 @@ function restoreOverlay(win: BrowserWindow) {
     const o = lastOverlay.get(win);
     if (o && !win.isDestroyed()) origSetOverlay.call(win, o[0], o[1]);
 }
+
+// Vesktop no quita su icono de la bandeja al salir. Si el proceso termina sin limpiar,
+// Windows deja iconos "fantasma" que solo desaparecen al pasar el mouse.
+// Registramos cada icono de bandeja y lo destruimos al salir; si algo se queda colgado, forzamos la salida.
+const trays = new Set<Tray>();
+try {
+    const origSetContextMenu = Tray.prototype.setContextMenu;
+    Tray.prototype.setContextMenu = function (this: Tray, ...args: any[]) {
+        trays.add(this);
+        return (origSetContextMenu as any).apply(this, args);
+    };
+} catch { }
+
+function destroyTrays() {
+    for (const t of trays) {
+        try { if (!t.isDestroyed()) t.destroy(); } catch { }
+    }
+    trays.clear();
+}
+
+app.on("will-quit", () => {
+    destroyTrays();
+    // red de seguridad: si algo mantiene vivo el proceso, salir igual a los 4 s
+    setTimeout(() => app.exit(0), 4000).unref();
+});
 
 let customIcon: NativeImage | null = null;
 let defaultIcon: NativeImage | null = null;

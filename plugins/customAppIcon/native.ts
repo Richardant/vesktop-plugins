@@ -4,7 +4,7 @@
  * La imagen se copia junto a los archivos de Vencord y se aplica a cada ventana nueva.
  */
 
-import { app, BrowserWindow, dialog, IpcMainInvokeEvent, nativeImage, NativeImage, Tray } from "electron";
+import { app, BrowserWindow, dialog, IpcMainInvokeEvent, nativeImage, NativeImage, session, Tray } from "electron";
 import { copyFileSync, existsSync, readdirSync, rmSync } from "fs";
 import { extname, join } from "path";
 
@@ -37,7 +37,8 @@ function restoreOverlay(win: BrowserWindow) {
 
 // Vesktop no quita su icono de la bandeja al salir. Si el proceso termina sin limpiar,
 // Windows deja iconos "fantasma" que solo desaparecen al pasar el mouse.
-// Registramos cada icono de bandeja y lo destruimos al salir; si algo se queda colgado, forzamos la salida.
+// Registramos cada icono de bandeja y lo destruimos al salir.
+// (No forzamos la salida: Discord guarda la sesión al cerrar la página y cortar el proceso la perdería.)
 const trays = new Set<Tray>();
 try {
     const origSetContextMenu = Tray.prototype.setContextMenu;
@@ -55,9 +56,9 @@ function destroyTrays() {
 }
 
 app.on("will-quit", () => {
+    // asegurar que la sesión de Discord (localStorage) quede escrita en disco
+    try { session.defaultSession.flushStorageData(); } catch { }
     destroyTrays();
-    // red de seguridad: si algo mantiene vivo el proceso, salir igual a los 4 s
-    setTimeout(() => app.exit(0), 4000).unref();
 });
 
 let customIcon: NativeImage | null = null;

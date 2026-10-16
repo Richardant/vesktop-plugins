@@ -21,8 +21,8 @@ const settings = definePluginSettings({
         type: OptionType.SELECT,
         description: "Qué conservar cuando el PC o la conexión no dan para todo",
         options: [
-            { label: "Fluidez y nitidez (mantener FPS y resolución; baja solo un poco la calidad de imagen si hace falta)", value: "maintain-framerate-and-resolution", default: true },
-            { label: "Fluidez (mantener FPS; puede bajar la resolución)", value: "maintain-framerate" },
+            { label: "Fluidez (mantener FPS; puede bajar la resolución) — recomendado", value: "maintain-framerate", default: true },
+            { label: "Fluidez y nitidez (experimental: mantener FPS y resolución)", value: "maintain-framerate-and-resolution" },
             { label: "Equilibrado (comportamiento normal de Chromium)", value: "balanced" },
             { label: "Nitidez (mantener resolución, baja FPS)", value: "maintain-resolution" }
         ]
@@ -245,63 +245,6 @@ async function probeGpu() {
     try { await Native.gpuDiagnostics(); } catch { }
 }
 
-// ---- Prueba de codificación (diagnóstico) ----
-// Codifica unos segundos con una conexión local (sin red) y anota si salen cuadros y con qué codificador.
-async function encodeTest(label: string, track: MediaStreamTrack, prof: string) {
-    const a = new RTCPeerConnection(), z = new RTCPeerConnection();
-    const res: any = { label, prof, settings: track.getSettings() };
-    try {
-        a.onicecandidate = e => e.candidate && z.addIceCandidate(e.candidate);
-        z.onicecandidate = e => e.candidate && a.addIceCandidate(e.candidate);
-        const tr = a.addTransceiver(track, { direction: "sendonly" });
-        const codecs = (RTCRtpSender.getCapabilities("video")?.codecs ?? []).filter(c => c.mimeType === "video/H264" && c.sdpFmtpLine?.includes("profile-level-id=" + prof) && c.sdpFmtpLine.includes("packetization-mode=1"));
-        res.codecFound = codecs.length;
-        if (!codecs.length) return res;
-        tr.setCodecPreferences(codecs);
-        await (origSLD as any).call(a);
-        await (origSRD as any).call(z, a.localDescription!);
-        await (origSLD as any).call(z);
-        await (origSRD as any).call(a, z.localDescription!);
-        await new Promise(r => setTimeout(r, 5000));
-        (await a.getStats()).forEach((x: any) => {
-            if (x.type === "outbound-rtp" && x.kind === "video")
-                Object.assign(res, { framesEncoded: x.framesEncoded, bytesSent: x.bytesSent, fps: x.framesPerSecond, w: x.frameWidth, h: x.frameHeight, impl: x.encoderImplementation, hw: x.powerEfficientEncoder, limit: x.qualityLimitationReason });
-        });
-    } catch (e) {
-        res.error = String(e);
-    } finally {
-        a.close(); z.close();
-    }
-    return res;
-}
-
-async function canvasSelfTest() {
-    const c = document.createElement("canvas");
-    c.width = 1592; c.height = 1040;
-    const ctx = c.getContext("2d")!;
-    let i = 0;
-    const iv = setInterval(() => { ctx.fillStyle = `hsl(${i++ * 7 % 360},80%,50%)`; ctx.fillRect(0, 0, c.width, c.height); }, 16);
-    try {
-        for (const prof of ["42e01f", "4d001f"]) {
-            const t = c.captureStream(60).getVideoTracks()[0];
-            await Native.saveSelfTest(await encodeTest("lienzo", t, prof));
-            t.stop();
-        }
-    } finally { clearInterval(iv); }
-}
-
-// Si la transmisión real usa la GPU pero no salen cuadros, probamos con una copia de la captura.
-let streamTested = false;
-async function streamSelfTest(track: MediaStreamTrack) {
-    if (streamTested) return;
-    streamTested = true;
-    for (const prof of ["4d001f", "42e01f"]) {
-        const t = track.clone();
-        await Native.saveSelfTest(await encodeTest("captura", t, prof));
-        t.stop();
-    }
-}
-
 // Si el codificador por GPU arranca pero no saca cuadros, lo reiniciamos quitando y volviendo a poner la imagen.
 const recovered = new WeakSet<RTCPeerConnection>();
 async function recoverEncoder(pc: RTCPeerConnection, sender: RTCRtpSender | undefined, track: MediaStreamTrack) {
@@ -316,6 +259,21 @@ async function recoverEncoder(pc: RTCPeerConnection, sender: RTCRtpSender | unde
 }
 
 const zeroSince = new WeakMap<RTCPeerConnection, number>();
+const stallSince = new WeakMap<RTCPeerConnection, number>();
+const lastReset = new WeakMap<RTCPeerConnection, number>();
+let resetting = false;
+async function resetEncoder(sender: RTCRtpSender | undefined, track: MediaStreamTrack) {
+    if (!sender || resetting) return;
+    resetting = true;
+    try {
+        await sender.replaceTrack(null);
+        await new Promise(r => setTimeout(r, 250));
+        if (track.readyState === "live") await sender.replaceTrack(track);
+        logger.info("Codificador reiniciado por caída de FPS");
+        void Native.saveSelfTest({ label: "reinicio" });
+    } catch (e) { logger.warn("No se pudo reiniciar el codificador", e); }
+    finally { resetting = false; }
+}
 let lastDropLog = 0;
 // Cuánto tarda en salir el primer cuadro de cada transmisión (para diagnosticar arranques lentos)
 const streamStart = new WeakMap<RTCPeerConnection, number>();
@@ -372,7 +330,6 @@ async function collectStats() {
             if (!zeroSince.has(pc)) zeroSince.set(pc, now);
             else if (now - zeroSince.get(pc)! > 3000) {
                 if (!recovered.has(pc)) void recoverEncoder(pc, sender, dTrack);
-                else if (now - zeroSince.get(pc)! > 10000) void streamSelfTest(dTrack);
             }
         } else zeroSince.delete(pc);
         const hw = out.powerEfficientEncoder === true ? "por hardware (GPU)" : out.powerEfficientEncoder === false ? "por software (CPU)" : "";
@@ -380,6 +337,17 @@ async function collectStats() {
         const realCapture = src?.framesPerSecond != null ? Math.round(src.framesPerSecond) : Math.round(captureFps);
         const bwe = pair?.availableOutgoingBitrate ? (pair.availableOutgoingBitrate / 1e6).toFixed(1) : "?";
         const sentFps = Math.round(out.framesPerSecond ?? 0);
+
+        // Vigilante: si la captura va bien pero casi no salen cuadros (codificador por GPU atascado
+        // o estimación de red hundida), reiniciar el codificador. Como mucho una vez cada 20 s.
+        if (out.framesEncoded && realCapture >= 15 && sentFps < 5) {
+            if (!stallSince.has(pc)) stallSince.set(pc, now);
+            else if (now - stallSince.get(pc)! > 4000 && now - (lastReset.get(pc) ?? 0) > 20_000) {
+                lastReset.set(pc, now);
+                stallSince.delete(pc);
+                void resetEncoder(sender, dTrack);
+            }
+        } else stallSince.delete(pc);
 
         // Registrar caídas fuertes de FPS con todo el contexto (máx. una cada 20 s)
         if (out.framesEncoded && sentFps > 0 && sentFps < 15 && now - lastDropLog > 20_000) {
@@ -476,7 +444,6 @@ export default definePlugin({
         timer = setInterval(tick, 1000);
         pickerObserver = new MutationObserver(() => checkPicker());
         pickerObserver.observe(document.body, { childList: true, subtree: true });
-        setTimeout(() => void canvasSelfTest().catch(e => logger.error("selftest", e)), 15000);
     },
 
     stop() {

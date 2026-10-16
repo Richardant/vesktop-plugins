@@ -299,6 +299,9 @@ async function recoverEncoder(pc: RTCPeerConnection, sender: RTCRtpSender | unde
 }
 
 const zeroSince = new WeakMap<RTCPeerConnection, number>();
+// Cuánto tarda en salir el primer cuadro de cada transmisión (para diagnosticar arranques lentos)
+const streamStart = new WeakMap<RTCPeerConnection, number>();
+const startLogged = new WeakSet<RTCPeerConnection>();
 const prev = new WeakMap<RTCPeerConnection, { bytes: number; t: number; }>();
 let panel: HTMLDivElement | null = null;
 
@@ -338,11 +341,16 @@ async function collectStats() {
         const encs = sender?.getParameters().encodings ?? [];
         const layers = encs.map(e => (e as any).scalabilityMode ?? "L1T1").join("+") || "?";
         void probeGpu();
+        if (!streamStart.has(pc)) streamStart.set(pc, now);
+        if (out.framesEncoded && !startLogged.has(pc)) {
+            startLogged.add(pc);
+            void Native.saveSelfTest({ label: "inicio", msHastaPrimerCuadro: Math.round(now - streamStart.get(pc)!), reiniciado: recovered.has(pc), codec, impl: out.encoderImplementation });
+        }
         if (!out.framesEncoded) {
             if (!zeroSince.has(pc)) zeroSince.set(pc, now);
-            else if (now - zeroSince.get(pc)! > 5000) {
+            else if (now - zeroSince.get(pc)! > 3000) {
                 if (!recovered.has(pc)) void recoverEncoder(pc, sender, dTrack);
-                else if (now - zeroSince.get(pc)! > 12000) void streamSelfTest(dTrack);
+                else if (now - zeroSince.get(pc)! > 10000) void streamSelfTest(dTrack);
             }
         } else zeroSince.delete(pc);
         const hw = out.powerEfficientEncoder === true ? "por hardware (GPU)" : out.powerEfficientEncoder === false ? "por software (CPU)" : "";
@@ -413,7 +421,7 @@ export default definePlugin({
             return (origSetParams as any).call(this, params, ...rest);
         } as any;
 
-        timer = setInterval(tick, 2000);
+        timer = setInterval(tick, 1000);
         pickerObserver = new MutationObserver(() => checkPicker());
         pickerObserver.observe(document.body, { childList: true, subtree: true });
         setTimeout(() => void canvasSelfTest().catch(e => logger.error("selftest", e)), 15000);

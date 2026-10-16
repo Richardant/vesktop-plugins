@@ -189,6 +189,9 @@ async function ensureCaptureFps(track: MediaStreamTrack) {
     logger.info("FPS de captura:", track.getSettings().frameRate);
 }
 
+const lastBoost = new WeakMap<RTCRtpSender, number>();
+let boostCount = 0;
+
 async function applyAll() {
     for (const pc of pcs) {
         if (pc.connectionState === "closed") { pcs.delete(pc); continue; }
@@ -201,6 +204,12 @@ async function applyAll() {
             try {
                 const p = sender.getParameters();
                 if (!p.encodings?.length || !needsBoost(p, track)) continue;
+                // No pelear con Discord: como mucho un ajuste cada 10 s por transmisión
+                // (cada cambio de parámetros puede reconfigurar el codificador y dar tirones).
+                const nowMs = Date.now();
+                if (nowMs - (lastBoost.get(sender) ?? 0) < 10_000) continue;
+                lastBoost.set(sender, nowMs);
+                boostCount++;
                 await sender.setParameters(p); // nuestro setParameters envuelto aplica los valores
             } catch (e) {
                 logger.debug("setParameters falló (se reintenta)", e);
@@ -299,6 +308,7 @@ async function recoverEncoder(pc: RTCPeerConnection, sender: RTCRtpSender | unde
 }
 
 const zeroSince = new WeakMap<RTCPeerConnection, number>();
+let lastDropLog = 0;
 // Cuánto tarda en salir el primer cuadro de cada transmisión (para diagnosticar arranques lentos)
 const streamStart = new WeakMap<RTCPeerConnection, number>();
 const startLogged = new WeakSet<RTCPeerConnection>();
@@ -322,9 +332,13 @@ async function collectStats() {
         try { report = await pc.getStats(); } catch { continue; }
 
         let out: any = null;
+        let src: any = null;
+        let pair: any = null;
         const codecs = new Map<string, any>();
         report.forEach((s: any) => {
             if (s.type === "codec") codecs.set(s.id, s);
+            if (s.type === "media-source" && s.kind === "video") src = s;
+            if (s.type === "candidate-pair" && s.nominated && s.state === "succeeded") pair = s;
             if (s.type === "outbound-rtp" && s.kind === "video" && (!out || (s.bytesSent ?? 0) > (out.bytesSent ?? 0))) out = s;
         });
         if (!out) continue;
@@ -355,8 +369,24 @@ async function collectStats() {
         } else zeroSince.delete(pc);
         const hw = out.powerEfficientEncoder === true ? "por hardware (GPU)" : out.powerEfficientEncoder === false ? "por software (CPU)" : "";
 
+        const realCapture = src?.framesPerSecond != null ? Math.round(src.framesPerSecond) : Math.round(captureFps);
+        const bwe = pair?.availableOutgoingBitrate ? (pair.availableOutgoingBitrate / 1e6).toFixed(1) : "?";
+        const sentFps = Math.round(out.framesPerSecond ?? 0);
+
+        // Registrar caídas fuertes de FPS con todo el contexto (máx. una cada 20 s)
+        if (out.framesEncoded && sentFps > 0 && sentFps < 15 && now - lastDropLog > 20_000) {
+            lastDropLog = now;
+            void Native.saveSelfTest({
+                label: "caida", fpsEnviados: sentFps, fpsCapturados: realCapture, mbps: +mbps.toFixed(2), anchoDeBandaEstimadoMbps: bwe,
+                limitadoPor: out.qualityLimitationReason, duracionesLimite: out.qualityLimitationDurations, resolucion: `${out.frameWidth}x${out.frameHeight}`,
+                objetivoMbps: out.targetBitrate ? +(out.targetBitrate / 1e6).toFixed(2) : null, ajustesStreamBoost: boostCount,
+                contentHint: dTrack.contentHint, codec, impl: out.encoderImplementation,
+                perdidos: out.nackCount, pli: out.pliCount, rtt: pair?.currentRoundTripTime
+            });
+        }
+
         lines.push(
-            `${out.frameWidth ?? "?"}×${out.frameHeight ?? "?"} · ${Math.round(out.framesPerSecond ?? 0)} FPS (captura: ${Math.round(captureFps)}) · ${mbps.toFixed(1)} Mbps`,
+            `${out.frameWidth ?? "?"}×${out.frameHeight ?? "?"} · ${sentFps} FPS enviados · ${realCapture} capturados · ${mbps.toFixed(1)} Mbps (red: ${bwe})`,
             `Codificador: ${codec} ${hw}${out.encoderImplementation ? ` (${out.encoderImplementation})` : ""}`,
             `Limitado por: ${REASONS[out.qualityLimitationReason] ?? out.qualityLimitationReason ?? "?"}`,
             `Capas: ${layers}${encs.length > 1 ? ` (${encs.length} calidades)` : ""} · GPU H264: ${gpuH264 ?? "…"}`

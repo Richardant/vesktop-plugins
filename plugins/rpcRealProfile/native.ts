@@ -23,6 +23,11 @@ const ports = new Set<import("worker_threads").MessagePort>();
 // Código que corre DENTRO del worker de arRPC antes que arRPC.
 const workerPrelude = (file: string) => `
 const wt = require("worker_threads");
+// arRPC busca juegos cada 5 s con PowerShell (Get-CimInstance). Si Windows/WMI falla una vez
+// ("La llamada fue cancelada por el filtro de mensaje"), la promesa queda sin capturar, el worker
+// muere y Vesktop muestra "A JavaScript error occurred in the main process". Lo ignoramos:
+// solo se pierde ese escaneo y el siguiente funciona normal.
+process.on("unhandledRejection", e => { try { console.warn("[RpcRealProfile] arRPC: escaneo fallido (ignorado):", String(e && e.message || e).split("\\n")[0]); } catch { } });
 const net = require("net");
 const MOCK = "1045800378228281345";
 let user = (wt.workerData && wt.workerData.__vcRpcUser) || null;
@@ -66,6 +71,8 @@ if (!(OrigWorker as any).__vcRpcPatched) {
                     transferList: [...(options.transferList ?? []), port2]
                 });
                 this.once("exit", () => ports.delete(port1));
+                // Vesktop no escucha errores del worker: sin esto, cualquier fallo de arRPC tumba el proceso principal
+                this.on("error", e => console.error("[RpcRealProfile] arRPC worker error (ignorado):", e));
                 return;
             }
             super(filename, options);

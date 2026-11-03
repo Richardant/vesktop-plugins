@@ -4,13 +4,14 @@
  * la categoría o el canal estén silenciados, o estén en "solo @menciones" / "nada".
  */
 
+import { Button } from "@components/Button";
 import { addGlobalContextMenuPatch, findGroupChildrenByChildId, GlobalContextMenuPatchCallback, removeGlobalContextMenuPatch } from "@api/ContextMenu";
 import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
 import { Logger } from "@utils/Logger";
 import definePlugin, { OptionType } from "@utils/types";
 import { filters, find } from "@webpack";
-import { Button, ChannelStore, GuildRoleStore, GuildStore, Menu, NavigationRouter, RelationshipStore, SelectedChannelStore, UserGuildSettingsStore, UserStore, useState } from "@webpack/common";
+import { ChannelStore, GuildRoleStore, GuildStore, Menu, NavigationRouter, RelationshipStore, SelectedChannelStore, UserGuildSettingsStore, UserStore, useState } from "@webpack/common";
 
 const logger = new Logger("CategoryPriorityNotifications");
 const CATEGORY = 4;
@@ -62,7 +63,7 @@ function CategoryList() {
                 return (
                     <div key={catId} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, color: "var(--text-normal)" }}>
                         <span>{guild?.name ?? "Servidor desconocido"} › <b>{cat?.name ?? catId}</b></span>
-                        <Button size={Button.Sizes.SMALL} color={Button.Colors.RED} onClick={() => { toggle(catId, guildId); rerender(x => x + 1); }}>Quitar</Button>
+                        <Button size="small" variant="dangerPrimary" onClick={() => { toggle(catId, guildId); rerender(x => x + 1); }}>Quitar</Button>
                     </div>
                 );
             })}

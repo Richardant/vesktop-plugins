@@ -386,6 +386,47 @@ function renderPanel(lines: string[]) {
     panel.textContent = "StreamBoost\n" + lines.join("\n");
 }
 
+// ---- Diagnóstico de video RECIBIDO (cámaras/streams de otros que no se ven) ----
+// Si llega video de alguien pero no se decodifica ningún cuadro durante 6 s, lo anotamos
+// (códec, paquetes, cuadros, decodificador) en streamBoost-selftest.json para saber la causa.
+const inboundSeen = new Map<string, { since: number; logged: boolean; okLogged: boolean; }>();
+async function checkInbound() {
+    for (const pc of pcs) {
+        if (pc.connectionState === "closed") continue;
+        let report: RTCStatsReport;
+        try { report = await pc.getStats(); } catch { continue; }
+        const codecs = new Map<string, any>();
+        const ins: any[] = [];
+        report.forEach((s: any) => {
+            if (s.type === "codec") codecs.set(s.id, s);
+            if (s.type === "inbound-rtp" && s.kind === "video") ins.push(s);
+        });
+        const now = performance.now();
+        for (const s of ins) {
+            if (!s.packetsReceived) continue;
+            const key = `${s.ssrc}`;
+            let st = inboundSeen.get(key);
+            if (!st) { st = { since: now, logged: false, okLogged: false }; inboundSeen.set(key, st); }
+            const c = codecs.get(s.codecId);
+            const info = {
+                codec: c?.mimeType, fmtp: c?.sdpFmtpLine, paquetes: s.packetsReceived, perdidos: s.packetsLost,
+                cuadrosRecibidos: s.framesReceived, cuadrosDecodificados: s.framesDecoded, claves: s.keyFramesDecoded,
+                descartados: s.framesDropped, decodificador: s.decoderImplementation, hw: s.powerEfficientDecoder,
+                res: `${s.frameWidth ?? "?"}x${s.frameHeight ?? "?"}`, pliEnviados: s.pliCount, firEnviados: s.firCount, nackEnviados: s.nackCount
+            };
+            if (!s.framesDecoded) {
+                if (!st.logged && now - st.since > 6000) {
+                    st.logged = true;
+                    void Native.saveSelfTest({ label: "recepcion-sin-imagen", ...info });
+                }
+            } else if (st.logged && !st.okLogged) {
+                st.okLogged = true;
+                void Native.saveSelfTest({ label: "recepcion-recuperada", segundos: Math.round((now - st.since) / 1000), ...info });
+            }
+        }
+    }
+}
+
 let timer: ReturnType<typeof setInterval> | null = null;
 let busy = false;
 async function tick() {
@@ -394,6 +435,7 @@ async function tick() {
     try {
         await applyAll();
         renderPanel(await collectStats());
+        await checkInbound();
     } finally { busy = false; }
 }
 

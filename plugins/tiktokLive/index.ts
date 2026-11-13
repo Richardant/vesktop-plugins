@@ -16,6 +16,8 @@ import { ApplicationAssetUtils, FluxDispatcher } from "@webpack/common";
 const Native = VencordNative.pluginHelpers.TikTokLive as PluginNative<typeof import("./native")>;
 const logger = new Logger("TikTokLive");
 const SOCKET = "TikTokLive";
+// Logo de TikTok (paquete abierto de íconos "dashboard-icons", servido por jsDelivr)
+const TIKTOK_LOGO = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/tiktok.png";
 
 const settings = definePluginSettings({
     username: {
@@ -32,7 +34,7 @@ const settings = definePluginSettings({
     },
     appId: {
         type: OptionType.STRING,
-        description: "Opcional: ID de una aplicación de Discord (Developer Portal) para mostrar la portada del directo como imagen. Vacío = sin imagen",
+        description: "ID de una aplicación tuya de Discord (discord.com/developers/applications → New Application → copiar Application ID). Hace falta para mostrar el logo de TikTok; vacío = sin imagen",
         default: "",
         onChange: () => void refresh(true)
     }
@@ -48,10 +50,18 @@ function liveUrl() {
     return `https://www.tiktok.com/@${settings.store.username.trim().replace(/^@/, "").toLowerCase()}/live`;
 }
 
+const assetCache = new Map<string, string>();
 async function imageFor(appId: string, url: string) {
+    const key = appId + "|" + url;
+    if (assetCache.has(key)) return assetCache.get(key);
     try {
-        return (await ApplicationAssetUtils.fetchAssetIds(appId, [url]))[0];
-    } catch { return undefined; }
+        const id = (await ApplicationAssetUtils.fetchAssetIds(appId, [url]))[0];
+        if (id) assetCache.set(key, id);
+        return id;
+    } catch (e) {
+        logger.warn("No se pudo preparar la imagen", url, e);
+        return undefined;
+    }
 }
 
 async function setActivity(info: { title?: string; viewers?: number; startTime?: number; cover?: string; }) {
@@ -69,9 +79,13 @@ async function setActivity(info: { title?: string; viewers?: number; startTime?:
         buttons: ["Ver en vivo"],
         metadata: { button_urls: [liveUrl()] }
     };
-    if (appId && info.cover) {
-        const big = await imageFor(appId, info.cover);
-        if (big) activity.assets = { large_image: big, large_text: "TikTok LIVE" };
+    if (appId) {
+        const [logo, cover] = await Promise.all([
+            imageFor(appId, TIKTOK_LOGO),
+            info.cover ? imageFor(appId, info.cover) : Promise.resolve(undefined)
+        ]);
+        if (logo) activity.assets = { large_image: logo, large_text: "TikTok LIVE" };
+        if (logo && cover) Object.assign(activity.assets, { small_image: cover, small_text: info.title || "En vivo" });
     }
     FluxDispatcher.dispatch({ type: "LOCAL_ACTIVITY_UPDATE", activity, socketId: SOCKET });
     shown = true;

@@ -31,7 +31,8 @@ export interface LiveInfo {
 }
 
 export async function checkLive(_: IpcMainInvokeEvent, username: string): Promise<LiveInfo> {
-    const user = String(username ?? "").trim().replace(/^@/, "");
+    // TikTok solo reconoce el usuario en minúsculas (con mayúsculas responde "no existe")
+    const user = String(username ?? "").trim().replace(/^@/, "").toLowerCase();
     if (!user) return { ok: false, error: "sin usuario" };
     try {
         const url = `https://www.tiktok.com/api-live/user/room/?aid=1988&uniqueId=${encodeURIComponent(user)}&sourceType=54`;

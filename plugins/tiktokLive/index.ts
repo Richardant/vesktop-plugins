@@ -2,7 +2,7 @@
  * TikTokLive — muestra en tu perfil de Discord que estás en vivo en TikTok,
  * como hace Discord con Twitch.
  *
- * Mientras TikTok LIVE Studio está abierto, revisa cada 30 s si tu cuenta está en vivo.
+ * Revisa si tu cuenta está en vivo (cada 30 s con TikTok LIVE Studio abierto, si no cada minuto).
  * Si lo está, pone una actividad "TikTok LIVE" con el título del directo, los espectadores,
  * el tiempo en vivo y un botón "Ver en vivo" (los demás ven el botón; Discord oculta
  * los botones de tu propia actividad solo para ti).
@@ -22,12 +22,6 @@ const settings = definePluginSettings({
         type: OptionType.STRING,
         description: "Tu usuario de TikTok (sin @)",
         default: "Richardant_",
-        onChange: () => void refresh(true)
-    },
-    detectWithoutStudio: {
-        type: OptionType.BOOLEAN,
-        description: "Detectar también directos hechos desde el celular u OBS (revisa tu cuenta cada 2 minutos aunque LIVE Studio esté cerrado)",
-        default: false,
         onChange: () => void refresh(true)
     },
     showViewers: {
@@ -51,7 +45,7 @@ let shown = false;
 let busy = false;
 
 function liveUrl() {
-    return `https://www.tiktok.com/@${settings.store.username.trim().replace(/^@/, "")}/live`;
+    return `https://www.tiktok.com/@${settings.store.username.trim().replace(/^@/, "").toLowerCase()}/live`;
 }
 
 async function imageFor(appId: string, url: string) {
@@ -95,12 +89,9 @@ async function refresh(force = false) {
     try {
         const studio = await Native.studioRunning();
         const now = Date.now();
-        const interval = studio ? 30_000 : 120_000;
-        if (!studio && !settings.store.detectWithoutStudio) {
-            lastInfo = null;
-            clearActivity();
-            return;
-        }
+        // Con LIVE Studio abierto revisamos cada 30 s; si no, cada minuto (por si transmites
+        // desde el celular u OBS, o si LIVE Studio usa otro nombre de proceso).
+        const interval = studio ? 30_000 : 60_000;
         if (!force && now - lastCheck < interval) return;
         lastCheck = now;
 

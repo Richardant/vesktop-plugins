@@ -1,0 +1,143 @@
+/*
+ * TikTokLive — muestra en tu perfil de Discord que estás en vivo en TikTok,
+ * como hace Discord con Twitch.
+ *
+ * Mientras TikTok LIVE Studio está abierto, revisa cada 30 s si tu cuenta está en vivo.
+ * Si lo está, pone una actividad "TikTok LIVE" con el título del directo, los espectadores,
+ * el tiempo en vivo y un botón "Ver en vivo" (los demás ven el botón; Discord oculta
+ * los botones de tu propia actividad solo para ti).
+ */
+
+import { definePluginSettings } from "@api/Settings";
+import { Logger } from "@utils/Logger";
+import definePlugin, { OptionType, PluginNative } from "@utils/types";
+import { ApplicationAssetUtils, FluxDispatcher } from "@webpack/common";
+
+const Native = VencordNative.pluginHelpers.TikTokLive as PluginNative<typeof import("./native")>;
+const logger = new Logger("TikTokLive");
+const SOCKET = "TikTokLive";
+
+const settings = definePluginSettings({
+    username: {
+        type: OptionType.STRING,
+        description: "Tu usuario de TikTok (sin @)",
+        default: "Richardant_",
+        onChange: () => void refresh(true)
+    },
+    detectWithoutStudio: {
+        type: OptionType.BOOLEAN,
+        description: "Detectar también directos hechos desde el celular u OBS (revisa tu cuenta cada 2 minutos aunque LIVE Studio esté cerrado)",
+        default: false,
+        onChange: () => void refresh(true)
+    },
+    showViewers: {
+        type: OptionType.BOOLEAN,
+        description: "Mostrar cuántos espectadores tienes",
+        default: true,
+        onChange: () => void refresh(true)
+    },
+    appId: {
+        type: OptionType.STRING,
+        description: "Opcional: ID de una aplicación de Discord (Developer Portal) para mostrar la portada del directo como imagen. Vacío = sin imagen",
+        default: "",
+        onChange: () => void refresh(true)
+    }
+});
+
+let timer: ReturnType<typeof setInterval> | null = null;
+let lastCheck = 0;
+let lastInfo: { live: boolean; title?: string; viewers?: number; startTime?: number; cover?: string; } | null = null;
+let shown = false;
+let busy = false;
+
+function liveUrl() {
+    return `https://www.tiktok.com/@${settings.store.username.trim().replace(/^@/, "")}/live`;
+}
+
+async function imageFor(appId: string, url: string) {
+    try {
+        return (await ApplicationAssetUtils.fetchAssetIds(appId, [url]))[0];
+    } catch { return undefined; }
+}
+
+async function setActivity(info: { title?: string; viewers?: number; startTime?: number; cover?: string; }) {
+    const appId = settings.store.appId.trim();
+    const activity: any = {
+        application_id: appId || "0",
+        name: "TikTok LIVE",
+        type: 0,
+        flags: 1,
+        details: info.title || "🔴 En vivo en TikTok",
+        state: settings.store.showViewers && info.viewers != null
+            ? `🔴 En vivo · ${info.viewers} ${info.viewers === 1 ? "espectador" : "espectadores"}`
+            : "🔴 En vivo ahora",
+        timestamps: { start: info.startTime ?? Date.now() },
+        buttons: ["Ver en vivo"],
+        metadata: { button_urls: [liveUrl()] }
+    };
+    if (appId && info.cover) {
+        const big = await imageFor(appId, info.cover);
+        if (big) activity.assets = { large_image: big, large_text: "TikTok LIVE" };
+    }
+    FluxDispatcher.dispatch({ type: "LOCAL_ACTIVITY_UPDATE", activity, socketId: SOCKET });
+    shown = true;
+}
+
+function clearActivity() {
+    if (!shown) return;
+    FluxDispatcher.dispatch({ type: "LOCAL_ACTIVITY_UPDATE", activity: null, socketId: SOCKET });
+    shown = false;
+}
+
+async function refresh(force = false) {
+    if (busy) return;
+    busy = true;
+    try {
+        const studio = await Native.studioRunning();
+        const now = Date.now();
+        const interval = studio ? 30_000 : 120_000;
+        if (!studio && !settings.store.detectWithoutStudio) {
+            lastInfo = null;
+            clearActivity();
+            return;
+        }
+        if (!force && now - lastCheck < interval) return;
+        lastCheck = now;
+
+        const r = await Native.checkLive(settings.store.username);
+        if (r.ok) {
+            lastInfo = { live: !!r.live, title: r.title, viewers: r.viewers, startTime: r.startTime, cover: r.cover };
+        } else {
+            logger.warn("No se pudo consultar TikTok:", r.error);
+            // Si TikTok no responde pero LIVE Studio está abierto, asumimos que sigues en vivo
+            // (o que estás por empezar) y mantenemos lo último que sabíamos.
+            if (!lastInfo) lastInfo = studio ? { live: true } : { live: false };
+        }
+
+        if (lastInfo.live) await setActivity(lastInfo);
+        else clearActivity();
+    } catch (e) {
+        logger.error(e);
+    } finally {
+        busy = false;
+    }
+}
+
+export default definePlugin({
+    name: "TikTokLive",
+    description: "Muestra en tu perfil de Discord que estás en vivo en TikTok (título, espectadores y botón \"Ver en vivo\"), como Discord hace con Twitch.",
+    authors: [{ name: "Richardant", id: 0n }],
+    settings,
+
+    start() {
+        setTimeout(() => void refresh(true), 5000);
+        timer = setInterval(() => void refresh(), 10_000);
+    },
+
+    stop() {
+        if (timer) clearInterval(timer);
+        timer = null;
+        lastInfo = null;
+        clearActivity();
+    }
+});

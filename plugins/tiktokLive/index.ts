@@ -32,6 +32,12 @@ const settings = definePluginSettings({
         default: true,
         onChange: () => void refresh(true)
     },
+    logo: {
+        type: OptionType.STRING,
+        description: "Logo: nombre de una imagen subida en tu aplicación (Developer Portal → Rich Presence → Art Assets) o un enlace a una imagen. Vacío = logo de TikTok por defecto",
+        default: "tiktok",
+        onChange: () => void refresh(true)
+    },
     appId: {
         type: OptionType.STRING,
         description: "ID de una aplicación tuya de Discord (discord.com/developers/applications → New Application → copiar Application ID). Hace falta para mostrar el logo de TikTok; vacío = sin imagen",
@@ -81,7 +87,7 @@ async function setActivity(info: { title?: string; viewers?: number; startTime?:
     };
     if (appId) {
         const [logo, cover] = await Promise.all([
-            imageFor(appId, TIKTOK_LOGO),
+            (async () => (settings.store.logo.trim() && await imageFor(appId, settings.store.logo.trim())) || imageFor(appId, TIKTOK_LOGO))(),
             info.cover ? imageFor(appId, info.cover) : Promise.resolve(undefined)
         ]);
         if (logo) activity.assets = { large_image: logo, large_text: "TikTok LIVE" };

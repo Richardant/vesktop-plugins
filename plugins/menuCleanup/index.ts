@@ -1,8 +1,8 @@
 /*
  * MenuCleanup — ordena y limpia algunos menús de Discord.
  *
- * (Por dentro: quita las opciones "Eliminar amigo" y "Bloquear" (esta última cuando la persona es
- *  tu amigo) de todos los menús — clic derecho sobre un usuario, el "..." de la lista de amigos y
+ * (Por dentro: quita las opciones "Eliminar amigo", "Bloquear" (esta última cuando la persona es
+ *  tu amigo), "Ignorar" y "Reportar" (de usuarios) de todos los menús — clic derecho sobre un usuario, el "..." de la lista de amigos y
  *  el del perfil — y además bloquea las acciones en sí, por si se intentan desde otro lugar.
  *  Cancelar o ignorar solicitudes y desbloquear usuarios sigue funcionando.)
  */
@@ -18,6 +18,10 @@ const REMOVE_ID = /remove[-_ ]?friend/i;
 const REMOVE_LABEL = /^(remove friend|eliminar amigo|eliminar de amigos|quitar amigo)$/i;
 const BLOCK_ID = /^block(-user)?$/i;
 const BLOCK_LABEL = /^(block|bloquear)$/i;
+const IGNORE_ID = /^ignore(-user)?$/i;
+const IGNORE_LABEL = /^(ignore|ignorar)$/i;
+const REPORT_ID = /^(report|report-user|user-report)$/i;
+const REPORT_LABEL = /^(report|report user|reportar|reportar usuario|denunciar|denunciar usuario)$/i;
 
 function isFriend(id?: string | null) {
     try { return !!id && RelationshipStore.isFriend(id); } catch { return false; }
@@ -30,26 +34,29 @@ function matches(el: any, idRe: RegExp, labelRe: RegExp) {
     return typeof p.label === "string" && labelRe.test(p.label.trim());
 }
 
-function shouldHide(el: any, targetId: string | null) {
+function shouldHide(el: any, targetId: string | null, userMenu: boolean) {
     if (matches(el, REMOVE_ID, REMOVE_LABEL)) return true;
+    // "Ignorar" y "Reportar" en los menús de usuarios (no toca "Reportar mensaje")
+    if (userMenu && (matches(el, IGNORE_ID, IGNORE_LABEL) || matches(el, REPORT_ID, REPORT_LABEL))) return true;
     // "Bloquear": se oculta si la persona es tu amigo (o si el menú no dice de quién es)
     return matches(el, BLOCK_ID, BLOCK_LABEL) && (!targetId || isFriend(targetId));
 }
 
-function strip(children: any[], targetId: string | null) {
+function strip(children: any[], targetId: string | null, userMenu: boolean) {
     for (let i = children.length - 1; i >= 0; i--) {
         const c = children[i];
-        if (shouldHide(c, targetId)) { children.splice(i, 1); continue; }
+        if (shouldHide(c, targetId, userMenu)) { children.splice(i, 1); continue; }
         const kids = c?.props?.children;
-        if (Array.isArray(kids)) strip(kids, targetId);
-        else if (kids && shouldHide(kids, targetId)) c.props.children = null;
+        if (Array.isArray(kids)) strip(kids, targetId, userMenu);
+        else if (kids && shouldHide(kids, targetId, userMenu)) c.props.children = null;
     }
 }
 
-const menuPatch: GlobalContextMenuPatchCallback = (_navId, children, props) => {
+const menuPatch: GlobalContextMenuPatchCallback = (navId, children, props) => {
     try {
         const targetId = props?.user?.id ?? props?.userId ?? null;
-        strip(children, targetId);
+        const userMenu = !!targetId || /user|friend|profile/i.test(String(navId));
+        strip(children, targetId, userMenu);
     } catch { }
 };
 
